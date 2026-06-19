@@ -5,7 +5,7 @@ on: [push, pull_request]
 jobs:
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -23,8 +23,13 @@ jobs:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Pinned LTS runners, not `ubuntu-latest` (it trails the newest LTS by
+        # months). ubuntu-26.04 is the current Ubuntu LTS (preview runner image
+        # as of 2026-06); ubuntu-24.04 stays for stable coverage. Drop 24.04 and
+        # bump 26.04 when a newer LTS ships.
+        os: [ubuntu-24.04, ubuntu-26.04, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -34,7 +39,7 @@ jobs:
 
   msrv:
     name: MSRV (1.85.0)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85.0
@@ -43,7 +48,7 @@ jobs:
 
   audit:
     name: Security audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2
