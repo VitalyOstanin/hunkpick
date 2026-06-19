@@ -81,8 +81,7 @@ fn load_and_parse(opts: &InputOpts) -> Result<Option<model::Patch>, AppError> {
         return Ok(None);
     }
     reject_non_diff(&input)?;
-    let patch =
-        parser::parse(&input).map_err(|e| AppError::Usage(format!("parse error: {e:?}")))?;
+    let patch = parser::parse(&input).map_err(|e| AppError::Usage(format!("parse error: {e}")))?;
     Ok(Some(patch))
 }
 
@@ -150,8 +149,8 @@ fn write_out(bytes: &[u8]) -> Result<(), AppError> {
         .map_err(|e| AppError::Io(e.to_string()))
 }
 
-fn usage<E: std::fmt::Debug>(e: E) -> AppError {
-    AppError::Usage(format!("{e:?}"))
+fn usage<E: std::fmt::Display>(e: E) -> AppError {
+    AppError::Usage(format!("{e}"))
 }
 
 /// Verify the result diff (internal check by default, optional git check) then emit it.

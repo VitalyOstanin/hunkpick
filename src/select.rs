@@ -1,5 +1,6 @@
 use crate::model::*;
 use crate::split::auto_split_hunk;
+use std::fmt;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Selector {
@@ -18,22 +19,40 @@ pub enum SelectError {
     EmptySelection,
 }
 
-/// Per-file auto-split view: each file maps to its ordered sub-hunks (empty for binary).
-pub fn build_view(patch: &Patch) -> Vec<(usize, Vec<Hunk>)> {
-    let mut view = Vec::new();
-    for (fi, f) in patch.files.iter().enumerate() {
-        match &f.content {
-            FileContent::Text(hunks) => {
-                let mut subs = Vec::new();
-                for h in hunks {
-                    subs.extend(auto_split_hunk(h));
-                }
-                view.push((fi, subs));
-            }
-            FileContent::Binary(_) => view.push((fi, Vec::new())),
+impl fmt::Display for SelectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SelectError::BadSelector(s) => write!(f, "bad selector: {s}"),
+            SelectError::UnknownPath(p) => write!(f, "no file in the diff matches path: {p}"),
+            SelectError::AmbiguousPath(p) => write!(f, "path matches more than one file: {p}"),
+            SelectError::NoIndex(s) => write!(f, "no such sub-hunk: {s}"),
+            SelectError::EmptySelection => write!(f, "selection is empty"),
         }
     }
-    view
+}
+
+/// Auto-split one file's hunks into its ordered sub-hunks (empty for a binary file).
+pub fn build_file_subs(f: &FileDiff) -> Vec<Hunk> {
+    match &f.content {
+        FileContent::Text(hunks) => {
+            let mut subs = Vec::new();
+            for h in hunks {
+                subs.extend(auto_split_hunk(h));
+            }
+            subs
+        }
+        FileContent::Binary(_) => Vec::new(),
+    }
+}
+
+/// Per-file auto-split view: each file maps to its ordered sub-hunks (empty for binary).
+pub fn build_view(patch: &Patch) -> Vec<(usize, Vec<Hunk>)> {
+    patch
+        .files
+        .iter()
+        .enumerate()
+        .map(|(fi, f)| (fi, build_file_subs(f)))
+        .collect()
 }
 
 /// Parse selector args. A selector is `path:list` or (for single-file diffs) just `list`,
@@ -92,14 +111,18 @@ fn parse_index_list(s: &str) -> Result<Vec<usize>, ()> {
 
 pub fn select(patch: &Patch, selectors: &[Selector]) -> Result<Patch, SelectError> {
     use std::collections::BTreeMap;
-    let view = build_view(patch);
+    // Auto-split lazily, only for files a selector actually names, and cache by file index so
+    // each referenced file is split once (selectors may target the same file repeatedly).
+    let mut subs_cache: BTreeMap<usize, Vec<Hunk>> = BTreeMap::new();
     let mut chosen: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
 
     for sel in selectors {
         let Selector::File { path, indices } = sel;
         let fi = resolve_file(patch, path.as_deref())?;
-        let subs = &view.iter().find(|(f, _)| *f == fi).unwrap().1;
         let is_binary = matches!(patch.files[fi].content, FileContent::Binary(_));
+        let subs = subs_cache
+            .entry(fi)
+            .or_insert_with(|| build_file_subs(&patch.files[fi]));
         for &idx in indices {
             if !is_binary && idx > subs.len() {
                 let pname = path
@@ -122,7 +145,7 @@ pub fn select(patch: &Patch, selectors: &[Selector]) -> Result<Patch, SelectErro
         let content = match &src.content {
             FileContent::Binary(b) => FileContent::Binary(b.clone()),
             FileContent::Text(_) => {
-                let subs = &view.iter().find(|(f, _)| *f == fi).unwrap().1;
+                let subs = &subs_cache[&fi];
                 FileContent::Text(idxs.iter().map(|&i| subs[i - 1].clone()).collect())
             }
         };
@@ -242,6 +265,36 @@ diff --git a/f b/f
         let text = String::from_utf8(emit(&out)).unwrap();
         assert!(text.contains("+B"));
         assert!(!text.contains("+D")); // second change excluded
+    }
+
+    const TWO_FILES: &str = "\
+diff --git a/x b/x
+--- a/x
++++ b/x
+@@ -1,3 +1,3 @@
+ a
+-b
++B
+ c
+diff --git a/y b/y
+--- a/y
++++ b/y
+@@ -1,3 +1,3 @@
+ p
+-q
++Q
+ r
+";
+
+    #[test]
+    fn select_across_two_files() {
+        let p = parse(TWO_FILES.as_bytes()).unwrap();
+        let sels = parse_selectors(&["x:1".to_string(), "y:1".to_string()]).unwrap();
+        let out = select(&p, &sels).unwrap();
+        assert_eq!(out.files.len(), 2);
+        let text = String::from_utf8(emit(&out)).unwrap();
+        assert!(text.contains("+B"));
+        assert!(text.contains("+Q"));
     }
 
     #[test]

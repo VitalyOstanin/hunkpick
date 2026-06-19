@@ -77,6 +77,11 @@ pub fn list_json(patch: &Patch) -> String {
     serde_json::to_string_pretty(&files).unwrap()
 }
 
+// SGR (Select Graphic Rendition) parameter codes used for the human-readable listing.
+const SGR_BOLD: &str = "1";
+const SGR_RED: &str = "31";
+const SGR_GREEN: &str = "32";
+
 fn paint(s: &str, code: &str, color: bool) -> String {
     if color {
         format!("\x1b[{code}m{s}\x1b[0m")
@@ -98,12 +103,12 @@ pub fn list_human(patch: &Patch, color: bool) -> String {
         out.push('\n');
         for (i, h) in subs.iter().enumerate() {
             let (added, deleted) = h.change_counts();
-            let idx = paint(&format!("[{}]", i + 1), "1", color);
+            let idx = paint(&format!("[{}]", i + 1), SGR_BOLD, color);
             let pv = preview(h);
             let pv = if pv.starts_with('+') {
-                paint(&pv, "32", color)
+                paint(&pv, SGR_GREEN, color)
             } else if pv.starts_with('-') {
-                paint(&pv, "31", color)
+                paint(&pv, SGR_RED, color)
             } else {
                 pv
             };

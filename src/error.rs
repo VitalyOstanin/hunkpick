@@ -9,7 +9,8 @@ pub enum AppError {
     Verify(String),
     /// I/O error reading stdin or writing stdout.
     Io(String),
-    /// Unexpected internal error.
+    /// Unexpected internal error. Reserved for future use: no current code path constructs
+    /// it, but it keeps a distinct exit-code slot for invariant violations should one arise.
     Internal(String),
 }
 

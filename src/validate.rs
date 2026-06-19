@@ -38,16 +38,7 @@ pub fn validate_internal(patch: &Patch) -> Result<(), ValidationError> {
                     hunk_index: i,
                 });
             }
-            let mut ctx = 0u32;
-            let mut add = 0u32;
-            let mut del = 0u32;
-            for l in &h.lines {
-                match l.kind {
-                    LineKind::Context => ctx += 1,
-                    LineKind::Add => add += 1,
-                    LineKind::Del => del += 1,
-                }
-            }
+            let (ctx, add, del) = count_kinds(&h.lines);
             if h.old_lines != ctx + del {
                 return Err(ValidationError::CountMismatch {
                     file: path.clone(),

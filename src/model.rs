@@ -60,19 +60,28 @@ impl FileDiff {
     }
 }
 
+/// (context, added, deleted) line counts over a slice of lines. Shared by the few places
+/// that need per-kind tallies (`change_counts`, header recomputation in `split`, the
+/// internal consistency check in `validate`) so the count logic lives in one spot.
+pub(crate) fn count_kinds(lines: &[Line]) -> (u32, u32, u32) {
+    let mut ctx = 0;
+    let mut add = 0;
+    let mut del = 0;
+    for l in lines {
+        match l.kind {
+            LineKind::Context => ctx += 1,
+            LineKind::Add => add += 1,
+            LineKind::Del => del += 1,
+        }
+    }
+    (ctx, add, del)
+}
+
 impl Hunk {
     /// (added, deleted) line counts.
     pub fn change_counts(&self) -> (u32, u32) {
-        let mut added = 0;
-        let mut deleted = 0;
-        for l in &self.lines {
-            match l.kind {
-                LineKind::Add => added += 1,
-                LineKind::Del => deleted += 1,
-                LineKind::Context => {}
-            }
-        }
-        (added, deleted)
+        let (_, add, del) = count_kinds(&self.lines);
+        (add, del)
     }
 }
 

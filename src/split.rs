@@ -1,9 +1,21 @@
 use crate::model::*;
+use std::fmt;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SplitError {
     NotAContextLine(u32),
     OutOfRange(u32),
+}
+
+impl fmt::Display for SplitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SplitError::NotAContextLine(n) => {
+                write!(f, "new-file line {n} is a change line, not a context line")
+            }
+            SplitError::OutOfRange(n) => write!(f, "new-file line {n} is out of range"),
+        }
+    }
 }
 
 /// Auto-split a hunk into minimal sub-hunks at context gaps between change runs.
@@ -120,30 +132,14 @@ fn rebuild_pieces(h: &Hunk, starts: &[usize], ends: &[usize]) -> Vec<Hunk> {
 /// Build a Hunk from a slice of `h.lines` starting at absolute index `abs_start`,
 /// recomputing old/new start offsets and line counts.
 fn rebuild_subhunk(h: &Hunk, slice: &[Line], abs_start: usize) -> Hunk {
-    let mut old_off = 0u32;
-    let mut new_off = 0u32;
-    for l in &h.lines[..abs_start] {
-        match l.kind {
-            LineKind::Context => {
-                old_off += 1;
-                new_off += 1;
-            }
-            LineKind::Del => old_off += 1,
-            LineKind::Add => new_off += 1,
-        }
-    }
-    let mut old_lines = 0u32;
-    let mut new_lines = 0u32;
-    for l in slice {
-        match l.kind {
-            LineKind::Context => {
-                old_lines += 1;
-                new_lines += 1;
-            }
-            LineKind::Del => old_lines += 1,
-            LineKind::Add => new_lines += 1,
-        }
-    }
+    // Old/new offsets of the slice are the line counts of everything before it; the slice's
+    // own old/new lengths are its counts. Context lines advance both sides.
+    let (pre_ctx, pre_add, pre_del) = count_kinds(&h.lines[..abs_start]);
+    let old_off = pre_ctx + pre_del;
+    let new_off = pre_ctx + pre_add;
+    let (ctx, add, del) = count_kinds(slice);
+    let old_lines = ctx + del;
+    let new_lines = ctx + add;
     Hunk {
         old_start: h.old_start + old_off,
         old_lines,

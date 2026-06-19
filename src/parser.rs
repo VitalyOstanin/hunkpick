@@ -1,9 +1,19 @@
 use crate::model::*;
+use std::fmt;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseError {
     BadHunkHeader(String),
     Unexpected(String),
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseError::BadHunkHeader(s) => write!(f, "malformed hunk header: {s}"),
+            ParseError::Unexpected(s) => write!(f, "unexpected diff content: {s}"),
+        }
+    }
 }
 
 pub fn parse(input: &[u8]) -> Result<Patch, ParseError> {

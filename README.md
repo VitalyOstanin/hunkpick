@@ -23,6 +23,7 @@ staging subsets of changes without interactive prompts.
 - [Auto-split and non-overlap](#auto-split-and-non-overlap)
 - [Exit codes](#exit-codes)
 - [Comparison to filterdiff](#comparison-to-filterdiff)
+- [Development](#development)
 - [License](#license)
 
 ## Why / Motivation
@@ -308,6 +309,31 @@ original (one hunk becomes several), but the applied result is the same.
 | Works with any diff source (not git-specific)   |     yes    |    yes   |
 | Built-in result verification                    |     no     |    yes   |
 | Binary file pass-through                        |     yes    |    yes   |
+
+## Development
+
+Contributions are welcome. The crate has no build-time code generation and no external
+runtime dependencies, so the standard cargo workflow applies.
+
+```sh
+# Run the full test suite (unit + integration + doc tests).
+cargo test --all-features
+
+# Lint with all warnings denied (the CI gate).
+cargo clippy --all-targets --all-features -- -D warnings
+
+# Check formatting (CI verifies this; use `cargo fmt --all` to apply).
+cargo fmt --all --check
+
+# Verify the code still builds on the minimum supported Rust version (1.85).
+cargo +1.85 build --all-features
+```
+
+The CI workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same
+checks, using [`cargo-nextest`](https://nexte.st/) for the unit/integration tests and
+`cargo test --doc` for doc tests. Test runner limits (per-test timeout and thread count)
+live in [`.config/nextest.toml`](.config/nextest.toml); please keep tests fast and
+hermetic — several tests shell out to `git apply --check` and require `git` on `PATH`.
 
 ## License
 
