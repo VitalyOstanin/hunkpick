@@ -55,6 +55,13 @@ pub fn parse_selectors(args: &[String]) -> Result<Vec<Selector>, SelectError> {
     Ok(out)
 }
 
+/// Upper bound on the number of indices a selector may materialise. The real sub-hunk
+/// count is only known later in `select`, so a range like `1-9999999999` from the command
+/// line would otherwise expand into a multi-gigabyte `Vec` before any bound check runs.
+/// This cap is far above any real diff's sub-hunk count; exceeding it is treated as a bad
+/// selector rather than an allocation.
+const MAX_SELECTOR_INDICES: usize = 1 << 20;
+
 fn parse_index_list(s: &str) -> Result<Vec<usize>, ()> {
     if s.is_empty() {
         return Err(());
@@ -65,6 +72,10 @@ fn parse_index_list(s: &str) -> Result<Vec<usize>, ()> {
             let lo: usize = lo.parse().map_err(|_| ())?;
             let hi: usize = hi.parse().map_err(|_| ())?;
             if lo == 0 || hi < lo {
+                return Err(());
+            }
+            let span = hi - lo + 1;
+            if span > MAX_SELECTOR_INDICES || v.len() + span > MAX_SELECTOR_INDICES {
                 return Err(());
             }
             v.extend(lo..=hi);
@@ -204,6 +215,15 @@ diff --git a/f b/f
         let Selector::File { path, indices } = &sels[0];
         assert!(path.is_none());
         assert_eq!(indices, &vec![1, 2]);
+    }
+
+    #[test]
+    fn huge_range_is_rejected_without_allocating() {
+        // The whole range is materialised into a Vec before the real sub-hunk count is
+        // checked in `select`. An unbounded `hi` from the command line must be rejected
+        // up front rather than allocating gigabytes.
+        assert!(parse_index_list("1-100000000").is_err());
+        assert!(parse_selectors(&["1-100000000".to_string()]).is_err());
     }
 
     #[test]

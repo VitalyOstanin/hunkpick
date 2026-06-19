@@ -106,6 +106,11 @@ fn rebuild_pieces(h: &Hunk, starts: &[usize], ends: &[usize]) -> Vec<Hunk> {
     assert_eq!(starts.len(), ends.len());
     let mut result = Vec::new();
     for (start, end) in starts.iter().zip(ends.iter()) {
+        // Skip empty pieces. A cut on the hunk's last line yields a trailing `start == end`
+        // slice that would emit a degenerate `@@ -X,0 +Y,0 @@` stanza git rejects.
+        if start >= end {
+            continue;
+        }
         let slice = &h.lines[*start..*end];
         result.push(rebuild_subhunk(h, slice, *start));
     }
@@ -294,6 +299,36 @@ diff --git a/f b/f
     fn explicit_split_out_of_range() {
         let h = hunk(TWO_CHANGES);
         assert_eq!(split_hunk_at(&h, &[99]), Err(SplitError::OutOfRange(99)));
+    }
+
+    #[test]
+    fn explicit_split_on_last_context_line_drops_empty_piece() {
+        // Cutting at the hunk's final context line leaves nothing after the cut, so the
+        // trailing piece would be an empty `@@ -X,0 +Y,0 @@` stanza that `git apply`
+        // rejects as a corrupt patch. The split must drop such degenerate pieces.
+        let h = hunk(
+            "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,3 +1,3 @@
+ a
+-b
++B
+ c
+",
+        );
+        // New-file line numbers: a=1 B=2 c=3. Cut at context line 3 (c), the last line.
+        let subs = split_hunk_at(&h, &[3]).unwrap();
+        for s in &subs {
+            assert!(!s.lines.is_empty(), "empty sub-hunk piece produced: {s:?}");
+            assert!(
+                s.old_lines > 0 || s.new_lines > 0,
+                "degenerate zero-count sub-hunk produced: {s:?}"
+            );
+        }
+        // The only meaningful piece is the change itself; the empty trailing piece is gone.
+        assert_eq!(subs.len(), 1);
     }
 
     #[test]

@@ -14,6 +14,10 @@ pub enum ValidationError {
         file: String,
         hunk_index: usize,
     },
+    EmptyHunk {
+        file: String,
+        hunk_index: usize,
+    },
 }
 
 /// Internal consistency check of a result diff. Git-agnostic, O(total lines).
@@ -26,6 +30,14 @@ pub fn validate_internal(patch: &Patch) -> Result<(), ValidationError> {
         let mut prev_old_end: Option<u32> = None;
         let mut prev_new_end: Option<u32> = None;
         for (i, h) in hunks.iter().enumerate() {
+            // A text hunk with no body lines emits a `@@ -X,0 +Y,0 @@` stanza git rejects
+            // as a corrupt patch. The count checks below pass it (0 == 0), so reject it here.
+            if h.lines.is_empty() {
+                return Err(ValidationError::EmptyHunk {
+                    file: path.clone(),
+                    hunk_index: i,
+                });
+            }
             let mut ctx = 0u32;
             let mut add = 0u32;
             let mut del = 0u32;
@@ -159,6 +171,35 @@ diff --git a/f b/f
         assert!(matches!(
             validate_internal(&p),
             Err(ValidationError::CountMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_hunk_body_is_caught() {
+        let mut p = parse(
+            "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,3 +1,3 @@
+ a
+-b
++B
+ c
+"
+            .as_bytes(),
+        )
+        .unwrap();
+        // A text hunk with no body lines and zero counts passes the count checks
+        // (0 == 0) yet emits a `@@ -X,0 +Y,0 @@` stanza git rejects. Catch it explicitly.
+        if let FileContent::Text(h) = &mut p.files[0].content {
+            h[0].lines.clear();
+            h[0].old_lines = 0;
+            h[0].new_lines = 0;
+        }
+        assert!(matches!(
+            validate_internal(&p),
+            Err(ValidationError::EmptyHunk { .. })
         ));
     }
 
