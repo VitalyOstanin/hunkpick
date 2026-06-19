@@ -69,7 +69,7 @@ included or excluded.
 
 ## Installation
 
-**From crates.io** (not yet published — use the source build below):
+**From crates.io:**
 
 ```sh
 cargo install hunkpick
