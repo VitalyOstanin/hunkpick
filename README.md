@@ -193,6 +193,28 @@ git diff path/to/file.rs | hunkpick list --json
 git diff path/to/file.rs | hunkpick select 1,3 | git apply --cached
 ```
 
+Splitting one file's mixed changes into several semantic commits, addressing
+sub-hunks by content id. Bare indices renumber after each staging, but a `@<id>`
+stays valid across the re-diff (see [Content ids](#content-ids)), so the listing
+is captured once and never re-read:
+
+```sh
+# 1. Capture the ids once. `id_count` flags any id that selects more than one.
+git diff src/indicator.js | hunkpick list --json
+
+# 2. Stage and commit each group by @id, re-running git diff each round. The ids
+#    from step 1 remain valid even though staging renumbers the bare indices.
+git diff src/indicator.js | hunkpick select @bf7bdaaf30c1e2d4 | git apply --cached
+git commit -m "fix: ..."
+
+git diff src/indicator.js | hunkpick select @058b36528575a870 @399e1cd421e268cc | git apply --cached
+git commit -m "feat: ..."
+
+# 3. Whatever is left is the last group; `*` takes the remaining sub-hunks.
+git diff src/indicator.js | hunkpick select '*' | git apply --cached
+git commit -m "chore: ..."
+```
+
 ## Selectors
 
 Selectors are passed as positional arguments to `select`. Each selector addresses
