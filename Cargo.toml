@@ -11,13 +11,15 @@ keywords = ["diff", "patch", "hunk", "git", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
 # Trim the published crate to source + README + LICENSE + CHANGELOG + tests.
-# CI config, release scripts, and design docs (ADRs) matter to repository
-# contributors but not to crates.io consumers.
+# CI config, release scripts, design docs (ADRs), and contributor guides matter to
+# repository contributors but not to crates.io consumers.
 exclude = [
     ".github/",
     ".config/",
     "scripts/",
     "docs/",
+    "CONTRIBUTING.md",
+    "CLAUDE.md",
 ]
 
 [dependencies]

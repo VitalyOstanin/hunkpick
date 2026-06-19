@@ -35,7 +35,9 @@ impl fmt::Display for SelectError {
 pub fn build_file_subs(f: &FileDiff) -> Vec<Hunk> {
     match &f.content {
         FileContent::Text(hunks) => {
-            let mut subs = Vec::new();
+            // Each source hunk yields at least one sub-hunk, so the hunk count is a lower
+            // bound on the result length; reserve it to avoid repeated reallocation.
+            let mut subs = Vec::with_capacity(hunks.len());
             for h in hunks {
                 subs.extend(auto_split_hunk(h));
             }

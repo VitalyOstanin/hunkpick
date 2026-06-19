@@ -1,6 +1,12 @@
 use std::fmt;
 
 /// Application-level error with a process exit code.
+///
+/// Each variant carries a rendered message rather than a typed source: this is a CLI, the
+/// message is written to stderr and the typed cause is not needed programmatically, so
+/// domain errors (`ParseError`, `SelectError`, `ValidationError`) are formatted into the
+/// string at conversion. If `hunkpick::error` gains library consumers, revisit this to carry
+/// `Box<dyn std::error::Error + Send + Sync>` sources and implement `Error::source()`.
 #[derive(Debug)]
 pub enum AppError {
     /// Usage / validation of arguments or input (bad selector, parse error, bad flag combo).
