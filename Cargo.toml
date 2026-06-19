@@ -1,0 +1,28 @@
+[package]
+name = "hunkpick"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["Vitaly Ostanin <vitaly.ostanin@gmail.com>"]
+description = "Non-interactive unified-diff hunk picker and splitter"
+license = "MIT"
+repository = "https://github.com/VitalyOstanin/hunkpick"
+keywords = ["diff", "patch", "hunk", "git", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+serde_json = "1"
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
