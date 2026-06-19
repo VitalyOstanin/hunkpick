@@ -10,6 +10,14 @@ repository = "https://github.com/VitalyOstanin/hunkpick"
 keywords = ["diff", "patch", "hunk", "git", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
+# Trim the published crate to source + README + LICENSE + CHANGELOG + tests.
+# CI config, release scripts, and design docs (ADRs) matter to repository
+# contributors but not to crates.io consumers.
+exclude = [
+    ".github/",
+    "scripts/",
+    "docs/",
+]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

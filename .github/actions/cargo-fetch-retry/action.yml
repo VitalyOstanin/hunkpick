@@ -1,0 +1,30 @@
+name: cargo-fetch-retry
+description: >-
+  Download all Cargo dependencies up front, retrying on transient network
+  failures. Isolating the network-bound fetch into one retried step keeps a
+  flaky crates.io download (e.g. curl 55 / SSL_ERROR_SYSCALL, which Cargo's
+  built-in net.retry does not classify as spurious) from failing the whole
+  job; subsequent build/test/clippy steps then run against the local cache.
+
+runs:
+  using: composite
+  steps:
+    - name: cargo fetch (retry on transient network errors)
+      shell: bash
+      run: |
+        attempts=5
+        delay=10
+        i=1
+        while [ "$i" -le "$attempts" ]; do
+          if cargo fetch --locked; then
+            exit 0
+          fi
+          if [ "$i" -lt "$attempts" ]; then
+            echo "::warning::cargo fetch failed (attempt ${i}/${attempts}); retrying in ${delay}s"
+            sleep "$delay"
+            delay=$((delay * 2))
+          fi
+          i=$((i + 1))
+        done
+        echo "::error::cargo fetch failed after ${attempts} attempts"
+        exit 1

@@ -1,5 +1,10 @@
 # hunkpick
 
+[![crates.io](https://img.shields.io/crates/v/hunkpick.svg)](https://crates.io/crates/hunkpick)
+[![docs.rs](https://docs.rs/hunkpick/badge.svg)](https://docs.rs/hunkpick)
+[![CI](https://github.com/VitalyOstanin/hunkpick/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/VitalyOstanin/hunkpick/actions/workflows/ci.yml?query=branch%3Amaster)
+[![license](https://img.shields.io/crates/l/hunkpick.svg)](https://github.com/VitalyOstanin/hunkpick/blob/master/LICENSE)
+
 Non-interactive unified-diff hunk picker and splitter — a pure stdin→stdout filter for
 staging subsets of changes without interactive prompts.
 
@@ -51,6 +56,15 @@ included or excluded.
 - **Encoding-agnostic**: the diff is processed as raw bytes end to end. Content in any
   encoding — including invalid UTF-8 — round-trips byte-for-byte; only the path and
   preview shown by `list` are decoded lossily for display.
+- **Cross-platform, including Windows**: `filterdiff`/`patchutils` is a Unix toolchain
+  that is awkward to obtain and run on Windows. `hunkpick` is a single self-contained
+  binary built for Linux, macOS, and Windows (`x86_64-pc-windows-msvc`), with no runtime
+  dependencies.
+- **AI-agent integration**: the first consumer is an automated coding agent. Staging a
+  precise subset of a diff programmatically needs non-interactive operation (no
+  `git add -p` prompts), a stable machine-readable `--json` listing, deterministic
+  per-file sub-hunk addressing, and structured exit codes — none of which the
+  interactive `git add -p` or the whole-hunk-only `filterdiff` provides.
 
 ## Installation
 
