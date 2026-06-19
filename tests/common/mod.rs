@@ -1,4 +1,6 @@
 // Shared helpers for integration tests that work with real git repositories.
+// Not every test binary uses every helper, so suppress per-binary dead-code warnings.
+#![allow(dead_code)]
 
 use std::process::Command as Sys;
 use tempfile::TempDir;

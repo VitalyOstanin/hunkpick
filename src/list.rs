@@ -1,10 +1,17 @@
 use crate::model::*;
 use crate::select::build_view;
 use serde::Serialize;
+use std::fmt::Write as _;
 
 #[derive(Serialize)]
 struct JsonHunk {
     index: usize,
+    /// Stable content id; pass as `@<id>` to `select`. See [`crate::subhunk_id`].
+    id: String,
+    /// How many sub-hunks in the whole patch share this id. `1` means the id is unique
+    /// (so `@<id>` addresses exactly this sub-hunk); `> 1` means `@<id>` would select all
+    /// of them — use `path:N` to pick one.
+    id_count: usize,
     old_start: u32,
     old_lines: u32,
     new_start: u32,
@@ -45,7 +52,17 @@ fn preview(h: &Hunk) -> String {
 }
 
 pub fn list_json(patch: &Patch) -> String {
+    use crate::subhunk_id::subhunk_hash;
     let view = build_view(patch);
+    // Histogram of content hashes across the whole patch, so each sub-hunk can report how
+    // many sub-hunks share its id (`id_count`).
+    let mut counts: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    for (fi, subs) in &view {
+        let f = &patch.files[*fi];
+        for h in subs {
+            *counts.entry(subhunk_hash(f, h)).or_insert(0) += 1;
+        }
+    }
     let mut files = Vec::new();
     for (fi, subs) in &view {
         let f = &patch.files[*fi];
@@ -55,8 +72,11 @@ pub fn list_json(patch: &Patch) -> String {
             .enumerate()
             .map(|(i, h)| {
                 let (added, deleted) = h.change_counts();
+                let hash = subhunk_hash(f, h);
                 JsonHunk {
                     index: i + 1,
+                    id: format!("{hash:016x}"),
+                    id_count: counts[&hash],
                     old_start: h.old_start,
                     old_lines: h.old_lines,
                     new_start: h.new_start,
@@ -104,6 +124,7 @@ pub fn list_human(patch: &Patch, color: bool) -> String {
         for (i, h) in subs.iter().enumerate() {
             let (added, deleted) = h.change_counts();
             let idx = paint(&format!("[{}]", i + 1), SGR_BOLD, color);
+            let id = crate::subhunk_id::subhunk_id(f, h);
             let pv = preview(h);
             let pv = if pv.starts_with('+') {
                 paint(&pv, SGR_GREEN, color)
@@ -112,10 +133,13 @@ pub fn list_human(patch: &Patch, color: bool) -> String {
             } else {
                 pv
             };
-            out.push_str(&format!(
-                "  {idx} {}  +{added} -{deleted}  {pv}\n",
+            // Write directly into the output buffer rather than building a temporary
+            // String per line (this runs once per sub-hunk).
+            let _ = writeln!(
+                out,
+                "  {idx} {id} {}  +{added} -{deleted}  {pv}",
                 header_string(h)
-            ));
+            );
         }
     }
     out
@@ -140,6 +164,44 @@ diff --git a/f b/f
  e
 ";
 
+    // Two byte-identical changes (same context and edit) -> same content id.
+    const DUP: &str = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,3 +1,3 @@
+ a
+-x
++Y
+ b
+@@ -10,3 +10,3 @@
+ a
+-x
++Y
+ b
+";
+
+    #[test]
+    fn json_id_count_is_one_for_unique_ids() {
+        let p = parse(MULTI.as_bytes()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
+        assert_eq!(v[0]["hunks"][0]["id_count"], 1);
+        assert_eq!(v[0]["hunks"][1]["id_count"], 1);
+    }
+
+    #[test]
+    fn json_id_count_marks_duplicates() {
+        let p = parse(DUP.as_bytes()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
+        let hunks = &v[0]["hunks"];
+        assert_eq!(
+            hunks[0]["id"], hunks[1]["id"],
+            "identical changes share an id"
+        );
+        assert_eq!(hunks[0]["id_count"], 2);
+        assert_eq!(hunks[1]["id_count"], 2);
+    }
+
     #[test]
     fn json_has_two_subhunks() {
         let p = parse(MULTI.as_bytes()).unwrap();
@@ -148,6 +210,30 @@ diff --git a/f b/f
         assert_eq!(v[0]["path"], "f");
         assert_eq!(v[0]["hunks"].as_array().unwrap().len(), 2);
         assert_eq!(v[0]["hunks"][0]["index"], 1);
+    }
+
+    #[test]
+    fn json_includes_subhunk_id() {
+        let p = parse(MULTI.as_bytes()).unwrap();
+        let j = list_json(&p);
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        let id = v[0]["hunks"][0]["id"].as_str().expect("id field present");
+        assert_eq!(id.len(), 16, "id must be 16 hex chars");
+        let view = crate::select::build_view(&p);
+        let expected = crate::subhunk_id::subhunk_id(&p.files[0], &view[0].1[0]);
+        assert_eq!(id, expected, "json id must match the canonical sub-hunk id");
+    }
+
+    #[test]
+    fn human_shows_subhunk_id() {
+        let p = parse(MULTI.as_bytes()).unwrap();
+        let out = list_human(&p, false);
+        let view = crate::select::build_view(&p);
+        let id = crate::subhunk_id::subhunk_id(&p.files[0], &view[0].1[0]);
+        assert!(
+            out.contains(&id),
+            "human output must contain id {id}:\n{out}"
+        );
     }
 
     #[test]

@@ -18,6 +18,7 @@ staging subsets of changes without interactive prompts.
   - [split](#split)
   - [Staging recipe](#staging-recipe)
 - [Selectors](#selectors)
+  - [Content ids](#content-ids)
 - [Verification](#verification)
 - [Input handling](#input-handling)
 - [Auto-split and non-overlap](#auto-split-and-non-overlap)
@@ -47,7 +48,13 @@ included or excluded.
   one per contiguous change run. The resulting sub-hunks are addressable individually
   by a stable 1-based per-file index.
 - **Per-file addressing**: selectors use `path:1,3` syntax, which is unambiguous in
-  multi-file diffs and composable in scripts.
+  multi-file diffs and composable in scripts. A `*` selects every sub-hunk of a file.
+- **Content ids**: each sub-hunk also carries a content-derived `@<id>`. It hashes only
+  the file paths and the sub-hunk's changed (`+`/`-`) lines — not its context or the `@@`
+  line numbers — so the id stays the same across a re-diff even when an edit elsewhere
+  shifts its line numbers or staging a neighbour rewrites its surrounding context. An
+  agent can capture `@<id>` once and keep using it across a staging loop. (Byte-identical
+  changes share an id; `list --json` reports `id_count`. See [Content ids](#content-ids).)
 - **Built-in verification**: the result diff is checked for internal consistency by
   default; an optional `git apply --check` run is available on demand.
 - **Git-agnostic**: `hunkpick` reads a diff from stdin and writes to stdout. It does
@@ -120,13 +127,17 @@ git diff src/main.rs | hunkpick list --color always
 
 ```
 src/main.rs
-  [1] @@ -10,4 +10,4 @@  +1 -1  +let x = 1;
-  [2] @@ -20,6 +20,6 @@  +1 -1  +fn bar() {
+  [1] 114ccaaa7ce6c0f1 @@ -10,4 +10,4 @@  +1 -1  +let x = 1;
+  [2] 8002dd73f0dfd2f4 @@ -20,6 +20,6 @@  +1 -1  +fn bar() {
 ```
 
+The 16-hex token after the index is the sub-hunk's **content id** (see
+[Selectors](#selectors)).
+
 **JSON schema** (`--json`): array of file objects, each with `path`, `binary`, and
-`hunks` (array of sub-hunk objects with `index`, `old_start`, `old_lines`,
-`new_start`, `new_lines`, `added`, `deleted`, `header`, `preview`).
+`hunks` (array of sub-hunk objects with `index`, `id`, `id_count`, `old_start`,
+`old_lines`, `new_start`, `new_lines`, `added`, `deleted`, `header`, `preview`).
+`id_count` is how many sub-hunks across the whole patch share that `id` (`1` = unique).
 
 Binary files are listed with `"binary": true` and an empty `hunks` array.
 
@@ -143,6 +154,13 @@ git diff | hunkpick select src/main.rs:1,3 src/lib.rs:2 | git apply --cached
 
 # Select a range
 git diff path | hunkpick select path:2-4 | git apply --cached
+
+# Select every sub-hunk of a file (or the whole single-file diff)
+git diff | hunkpick select src/main.rs:* | git apply --cached
+git diff src/main.rs | hunkpick select '*' | git apply --cached
+
+# Select by content id (from `list --json`), stable across re-diffs
+git diff | hunkpick select @8002dd73f0dfd2f4 | git apply --cached
 ```
 
 A binary file referenced by any selector index is emitted whole.
@@ -184,18 +202,53 @@ sub-hunks within one file by their 1-based per-file index as reported by `list`.
 |--------------------|-------------------------------------------------------|
 | `1,3`              | Sub-hunks 1 and 3 (bare list, only for single-file diffs) |
 | `2-4`              | Sub-hunks 2, 3, and 4 (bare range, single-file only) |
+| `*`                | Every sub-hunk (bare `*`, single-file only)          |
 | `src/foo.rs:1,3`   | Sub-hunks 1 and 3 within `src/foo.rs`                |
 | `src/foo.rs:2-4`   | Sub-hunks 2 through 4 within `src/foo.rs`            |
+| `src/foo.rs:*`     | Every sub-hunk of `src/foo.rs`                        |
+| `@<id>`            | Every sub-hunk whose content id equals `<id>`         |
 
 Multiple selectors can be combined: `hunkpick select src/a.rs:1 src/b.rs:2,3`.
 
 Path matching checks both the old and new path of a file diff entry. A bare index
-list (no `path:` prefix) is accepted only when the diff contains exactly one file;
-otherwise `hunkpick` exits with code 2.
+list or `*` (no `path:` prefix) is accepted only when the diff contains exactly one
+file; otherwise `hunkpick` exits with code 2.
+
+Selectors are matched in order of precedence: a `path:set` form is recognised first
+(so a file literally named `@foo` is still addressable as `@foo:1`), then `@id`, then
+a bare set.
+
+### Content ids
+
+`list` reports a 16-hex **content id** for every sub-hunk, also accepted by `select`
+as `@<id>`. The id is a hash of the file paths and the sub-hunk's **changed (`+`/`-`)
+lines only** — **not** its context lines, the `@@` line numbers, or the section header.
+Ids are matched case-insensitively.
+
+Because only the changed lines feed the id, it is stable across a re-diff in every
+common case of an iterative `diff → stage → re-diff` loop:
+
+- An unrelated edit elsewhere that only shifts this change's line numbers leaves its id
+  unchanged.
+- Staging a neighbouring sub-hunk — which rewrites this change's surrounding context, or
+  causes the enclosing hunk to be re-split — also leaves its id unchanged, because the
+  context is not part of the id.
+
+So positional indices renumber as you stage changes, but a change's `@<id>` does not:
+capture it once from `list` and keep using it across the loop without re-reading the
+listing. The id changes only when the change's own `+`/`-` lines change.
+
+Because context is excluded, two changes with **identical `+`/`-` lines** share an id
+even if their surrounding context differs; `@<id>` then selects all of them. `list
+--json` reports `id_count` (how many sub-hunks share the id), so a consumer can tell up
+front whether `@<id>` is unique (`id_count == 1`) or would select several; to address
+just one of several identical changes, use `path:N`. If an id is ever shared by
+sub-hunks whose changed lines actually differ (an accidental hash collision), `select`
+reports it and exits with code 2 — address those by `path:N`.
 
 For the `split` subcommand the hunk address uses the same `path:N` / `N` form, but
 `N` refers to the 1-based index over the file's **original** hunks (not auto-split
-sub-hunks).
+sub-hunks). `split` does not accept `*` or `@id`.
 
 ## Verification
 

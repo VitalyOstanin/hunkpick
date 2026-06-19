@@ -13,6 +13,7 @@ added as a new ADR that supersedes the earlier one rather than editing it in pla
 | [0004](0004-result-diff-verification.md)       | Two-tier result-diff verification: internal by default, git apply on demand | Accepted | 2026-06-19 |
 | [0005](0005-byte-core-and-input-validation.md) | Byte-oriented core and input validation                              | Accepted | 2026-06-19 |
 | [0006](0006-input-source-and-size-limit.md)    | Input source selection and size limit                                | Accepted | 2026-06-19 |
+| [0007](0007-content-id-and-wildcard-addressing.md) | Content-id (`@id`) and wildcard (`*`) sub-hunk addressing        | Accepted | 2026-06-19 |
 
 ## Adding a new ADR
 

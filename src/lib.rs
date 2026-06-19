@@ -6,4 +6,5 @@ pub mod model;
 pub mod parser;
 pub mod select;
 pub mod split;
+pub mod subhunk_id;
 pub mod validate;

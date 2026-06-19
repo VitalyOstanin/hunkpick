@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-06-19
+
+### Added
+
+- Content ids for sub-hunks. `list` (human and `--json`) now reports a 16-hex `id`
+  per sub-hunk, derived from the file paths and the sub-hunk's changed (`+`/`-`) lines
+  only — independent of its context lines, the `@@` line numbers, and the section header.
+  The id is stable across a re-diff in the common agent loop: it is unchanged both when an
+  unrelated edit only shifts a change's line numbers and when staging a neighbour rewrites
+  the change's surrounding context (or re-splits the enclosing hunk). It changes only when
+  the change's own `+`/`-` lines change. `list --json` also reports `id_count` per
+  sub-hunk — how many sub-hunks share that id (`1` = unique), so a consumer can tell
+  whether `@<id>` addresses one sub-hunk or several.
+- `@<id>` selector for `select`: emits every sub-hunk whose content id equals `<id>`
+  (matched case-insensitively). Changes with identical `+`/`-` lines share an id and are
+  selected together (use `path:N` to pick one, guided by `id_count`); an id shared by
+  changes whose `+`/`-` lines genuinely differ (an accidental hash collision) is reported
+  and exits with code 2.
+- `*` selector: `path:*` selects every sub-hunk of a file; bare `*` selects every
+  sub-hunk of a single-file diff. Removes the need to first read the sub-hunk count
+  from `list`.
+
 ## [0.1.0] - 2026-06-19
 
 ### Added

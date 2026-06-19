@@ -4,12 +4,19 @@ use std::path::PathBuf;
 /// Default maximum input size in bytes (64 MiB).
 pub const DEFAULT_MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Pick and split unified-diff hunks.
+///
+/// hunkpick is a non-interactive filter: it reads a unified diff from stdin (or `-i FILE`)
+/// and writes a diff to stdout. It never runs `git diff` itself, so it works with any diff
+/// source (git, Mercurial, SVN, plain `diff -u`). Typical pipeline:
+/// `git diff <path> | hunkpick select <selectors...> | git apply --cached`.
+///
+/// Each hunk is auto-split into minimal sub-hunks (one contiguous change run each). Use
+/// `list` to see the addressable sub-hunks, `select` to emit a chosen subset, and `split`
+/// to cut one hunk at given lines. Run `hunkpick <command> --help` for selector syntax,
+/// content ids, and verification flags.
 #[derive(Parser, Debug)]
-#[command(
-    name = "hunkpick",
-    version,
-    about = "Pick and split unified-diff hunks"
-)]
+#[command(name = "hunkpick", version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -43,7 +50,13 @@ pub struct InputOpts {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// List sub-hunks per file with per-file indices.
+    /// List the addressable sub-hunks of each file.
+    ///
+    /// Each hunk is auto-split into minimal sub-hunks (one contiguous change run each). For
+    /// every sub-hunk `list` shows a 1-based per-file index and a 16-hex content id; either
+    /// can be passed to `select` (the id as `@<id>`). `--json` emits the same data as a
+    /// stable machine schema, plus `id_count` (how many sub-hunks share an id; 1 = unique).
+    /// Binary files are listed with no sub-hunks.
     List {
         /// Emit machine-readable JSON instead of the human listing.
         #[arg(long)]
@@ -54,8 +67,27 @@ pub enum Command {
         input: InputOpts,
     },
     /// Emit only the selected sub-hunks as a unified diff.
+    ///
+    /// Pipe the result into `git apply --cached` to stage exactly those changes. A binary
+    /// file named by any selector is emitted whole.
     Select {
-        /// Selectors like `path:1,3` or `2-4`; omit path for single-file input.
+        /// Sub-hunk selectors (one or more). Forms:
+        ///
+        ///   N | N,M | A-B   1-based index/range within a file (bare: single-file diff only)
+        ///   path:N,M        the same, within the named file
+        ///   path:* | *      every sub-hunk (of `path`, or of a single-file diff)
+        ///   @ID             every sub-hunk whose 16-hex content id is ID (from `list`)
+        ///
+        /// Indices and ids come from `list`. A content id is derived from the file path and
+        /// the sub-hunk's changed (+/-) lines only, ignoring context and the @@ line numbers:
+        /// it stays the same across a re-diff even when an edit elsewhere shifts this change's
+        /// line numbers or staging a neighbour rewrites its context, so an @ID captured once
+        /// keeps addressing the change; it changes only when this change's own +/- lines do.
+        /// Ids match case-insensitively. Changes with identical +/- lines share an id and are
+        /// selected together; use path:N (guided by id_count from `list --json`) to address
+        /// just one. Precedence: path:set first (a file named `@foo` stays addressable as
+        /// `@foo:1`), then @ID, then a bare set.
+        #[arg(verbatim_doc_comment)]
         selectors: Vec<String>,
         #[command(flatten)]
         input: InputOpts,
@@ -63,8 +95,13 @@ pub enum Command {
         verify: VerifyOpts,
     },
     /// Explicitly split one hunk at given new-file line numbers (context lines only).
+    ///
+    /// Replaces one ORIGINAL hunk with the pieces produced by cutting it at `--at`. Unlike
+    /// `select`, the address indexes the file's original hunks (before auto-split), and
+    /// neither `*` nor `@id` is accepted.
     Split {
-        /// Hunk address: `path:N` or `N` for single-file input.
+        /// Hunk address: `path:N` or `N` (single-file input). N indexes the file's ORIGINAL
+        /// hunks (before auto-split), not the sub-hunk indices shown by `list`.
         hunk: String,
         /// New-file line numbers to cut at.
         #[arg(long = "at", value_delimiter = ',', required = true)]
