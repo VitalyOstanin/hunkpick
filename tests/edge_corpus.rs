@@ -84,13 +84,17 @@ fn rename_is_preserved() {
 
 /// A file whose mode changes (non-executable → executable) and whose content
 /// also changes: hunkpick must preserve the old/new mode header lines.
+///
+/// Unix-only: the executable bit is not tracked on Windows (NTFS has no such
+/// permission and git's `core.filemode` defaults to false there), so `git diff`
+/// emits no `old mode`/`new mode` headers and the scenario cannot be produced.
+#[cfg(unix)]
 #[test]
 fn mode_change_passthrough() {
     let dir = common::repo_with(&[("f.sh", "line1\nline2\n")]);
 
     // Make executable and change a line.
     let path = dir.path().join("f.sh");
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();

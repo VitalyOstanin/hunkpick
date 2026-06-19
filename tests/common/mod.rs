@@ -10,6 +10,13 @@ pub fn repo_with(old_files: &[(&str, &str)]) -> TempDir {
     sys(&dir, &["init", "-q"]);
     sys(&dir, &["config", "user.email", "t@t"]);
     sys(&dir, &["config", "user.name", "t"]);
+    // Pin line-ending handling so committed content and `git diff` output are
+    // byte-identical across platforms. GitHub's Windows runners set
+    // `core.autocrlf=true` globally, which would rewrite LF→CRLF on add and
+    // perturb the diffs these tests assert on. `core.filemode` is left at the
+    // platform default: the mode-change test relies on it (Unix-only), and
+    // Windows reports false regardless.
+    sys(&dir, &["config", "core.autocrlf", "false"]);
     if old_files.is_empty() {
         sys_ok(&dir, &["commit", "-q", "-m", "init", "--allow-empty"]);
     } else {
