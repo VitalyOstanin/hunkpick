@@ -22,6 +22,22 @@ exclude = [
     "CLAUDE.md",
 ]
 
+# cargo-binstall: fetch the prebuilt binary from the matching GitHub Release
+# instead of compiling. The URL and in-archive layout mirror what
+# scripts/package-archive.sh produces: an asset named
+# `hunkpick-<version>-<target>.<ext>` whose single top-level directory
+# `hunkpick-<version>-<target>/` holds the binary. The literal `.tar.gz`
+# extension is spelled out (binstall's default `.tgz` suffix would not match),
+# and `pkg-fmt` tells binstall how to extract it. Windows ships a `.zip`.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.gz"
+bin-dir = "{ name }-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.zip"
+pkg-fmt = "zip"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

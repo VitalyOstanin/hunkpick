@@ -50,3 +50,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   endings, and plain (non-extended-header) unified diffs.
 - Structured exit codes: 0 success, 2 usage/parse error, 70 verification failure,
   74 I/O error, 130 signal termination.
+- Prebuilt binaries on GitHub Releases for `x86_64-unknown-linux-gnu`,
+  `aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`,
+  installable with `cargo binstall hunkpick`.

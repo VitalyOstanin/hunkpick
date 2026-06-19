@@ -75,6 +75,14 @@ included or excluded.
 cargo install hunkpick
 ```
 
+**Prebuilt binary via [cargo-binstall](https://github.com/cargo-bins/cargo-binstall)** (downloads the release artifact from GitHub instead of compiling):
+
+```sh
+cargo binstall hunkpick
+```
+
+Prebuilt binaries are published for `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`. On other targets `cargo binstall` falls back to a source build.
+
 **From source:**
 
 ```sh
