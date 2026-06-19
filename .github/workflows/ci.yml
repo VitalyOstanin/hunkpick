@@ -6,8 +6,9 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -22,6 +23,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -31,17 +33,27 @@ jobs:
         # bump 26.04 when a newer LTS ships.
         os: [ubuntu-24.04, ubuntu-26.04, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Prebuilt nextest binary (no compile, no Rust-version bump): the
+      # .config/nextest.toml profile enforces a per-test timeout and bounded
+      # parallelism that `cargo test` cannot express.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo nextest run --all-features
+      # nextest does not run doctests; keep them covered explicitly.
+      - name: Run doctests
+        run: cargo test --all-features --doc
 
   msrv:
     name: MSRV (1.85.0)
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.85.0
       - name: Build
         run: cargo build
@@ -49,8 +61,9 @@ jobs:
   audit:
     name: Security audit
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}

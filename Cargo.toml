@@ -15,6 +15,7 @@ readme = "README.md"
 # contributors but not to crates.io consumers.
 exclude = [
     ".github/",
+    ".config/",
     "scripts/",
     "docs/",
 ]

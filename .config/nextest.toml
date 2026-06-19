@@ -1,0 +1,12 @@
+# nextest test-runner configuration. See https://nexte.st/docs/configuration/
+[profile.default]
+# Per-test timeout: a test running longer than `period` is flagged slow; after
+# `terminate-after` such periods it is killed together with its child processes.
+# Integration tests spawn `git` via assert_cmd, so a hung child cannot stall the
+# whole run indefinitely (cargo test has no per-test timeout).
+slow-timeout = { period = "30s", terminate-after = 2 }
+
+# Bound test parallelism. cargo test defaults to one thread per logical CPU; on a
+# many-core machine the integration tests would spawn dozens of git processes and
+# temp files at once. 4 keeps the load predictable.
+test-threads = 4
