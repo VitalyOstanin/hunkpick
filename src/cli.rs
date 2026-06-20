@@ -37,10 +37,17 @@ Content ids (@<id>):
   # Select by content id (stable across re-diffs)
   git diff | hunkpick select @8002dd73f0dfd2f4 | git apply --cached
 
-  # Stage change groups one at a time, re-running git diff each round; the ids
-  # stay valid even though the bare indices renumber after every stage.
+  # Several ids at once (space-separated); mix with path: selectors freely
+  git diff | hunkpick select @8002dd73f0dfd2f4 @bf7bdaaf30c1e2d4 src/lib.rs:2 | git apply --cached
+
+  # Full loop: list ONCE, then stage groups by @id (one or more ids each),
+  # re-running git diff every round. The ids from the single `list` stay valid
+  # even as staging renumbers the bare indices, so the listing is never re-read.
+  # `*` takes whatever sub-hunks are left at the end.
+  git diff src/x.js | hunkpick list --json    # capture ids once (id_count flags shared ids)
   git diff src/x.js | hunkpick select @bf7bdaaf30c1e2d4 | git apply --cached && git commit -m 'fix: ...'
-  git diff src/x.js | hunkpick select @058b36528575a870 | git apply --cached && git commit -m 'feat: ...'
+  git diff src/x.js | hunkpick select @058b36528575a870 @399e1cd421e268cc | git apply --cached && git commit -m 'feat: ...'
+  git diff src/x.js | hunkpick select '*' | git apply --cached && git commit -m 'chore: ...'
 
 Each subcommand has its own detailed --help (full selector grammar, content-id
 rules, verification flags):
