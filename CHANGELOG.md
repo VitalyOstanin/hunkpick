@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-06-20
+
+### Changed
+
+- Expanded the examples in `hunkpick --help` and the README: selecting several
+  `@<id>`s at once (mixed with `path:` selectors), the full `list --json` once →
+  `select @id` staging loop ending with `*`, multi-file diffs
+  (`git diff file1 file2 fileN`) addressed per `path:`, and content ids across a
+  multi-file diff (the file path is part of the id, so an id addresses the change
+  in its own file). Examples that read ids before selecting use the
+  machine-readable `list --json`.
+
+### Tests
+
+- Added integration tests for multi-file diffs (`tests/multi_file.rs`): per-`path:`
+  selection across several files with a `git apply` check, `path:*` scoping to one
+  file, rejection of a bare selector on a multi-file diff (exit code 2), and
+  `@<id>` addressing its own file in a multi-file diff.
+
 ## [0.2.1] - 2026-06-20
 
 ### Changed

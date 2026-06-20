@@ -16,8 +16,9 @@ Examples:
   # Stage sub-hunks 1 and 3 of a single-file diff
   git diff src/main.rs | hunkpick select 1,3 | git apply --cached
 
-  # Multi-file diff: address sub-hunks per path; ranges with A-B
-  git diff | hunkpick select src/main.rs:1,3 src/lib.rs:2-4 | git apply --cached
+  # Multi-file diff (git diff over several files): address sub-hunks per path.
+  # A bare index needs a single-file diff; with many files every selector needs path:.
+  git diff src/a.rs src/b.rs src/c.rs | hunkpick select src/a.rs:1,3 src/c.rs:2-4 | git apply --cached
 
   # Every sub-hunk of a file (or of a single-file diff)
   git diff | hunkpick select src/main.rs:* | git apply --cached
@@ -37,7 +38,13 @@ Content ids (@<id>):
   # Select by content id (stable across re-diffs)
   git diff | hunkpick select @8002dd73f0dfd2f4 | git apply --cached
 
-  # Several ids at once (space-separated); mix with path: selectors freely
+  # In a multi-file diff an id still addresses its own file: the path is part of
+  # the id, so the same edit in another file gets a different id.
+  git diff src/a.rs src/b.rs src/c.rs | hunkpick select @8002dd73f0dfd2f4 | git apply --cached
+
+  # Several ids at once (space-separated); mix with path: selectors freely.
+  # Read the ids from `list --json` first (the machine-readable form), then select:
+  git diff | hunkpick list --json
   git diff | hunkpick select @8002dd73f0dfd2f4 @bf7bdaaf30c1e2d4 src/lib.rs:2 | git apply --cached
 
   # Full loop: list ONCE, then stage groups by @id (one or more ids each),

@@ -152,6 +152,11 @@ git diff src/main.rs | hunkpick select 1,3 | git apply --cached
 # Select sub-hunks from specific files in a multi-file diff
 git diff | hunkpick select src/main.rs:1,3 src/lib.rs:2 | git apply --cached
 
+# Same when the diff is taken over an explicit file list (git diff file1 file2 fileN).
+# With more than one file, every selector must carry a path: prefix (a bare index is
+# only allowed for a single-file diff).
+git diff src/a.rs src/b.rs src/c.rs | hunkpick select src/a.rs:1,3 src/c.rs:2-4 | git apply --cached
+
 # Select a range
 git diff path | hunkpick select path:2-4 | git apply --cached
 
@@ -161,6 +166,15 @@ git diff src/main.rs | hunkpick select '*' | git apply --cached
 
 # Select by content id (from `list --json`), stable across re-diffs
 git diff | hunkpick select @8002dd73f0dfd2f4 | git apply --cached
+
+# Content ids work across a multi-file diff too: the file path is part of the id, so
+# an id addresses the change in its own file (the same edit elsewhere gets another id).
+git diff src/a.rs src/b.rs src/c.rs | hunkpick select @8002dd73f0dfd2f4 | git apply --cached
+
+# Several ids at once, mixed with path: selectors. Read the ids from `list --json` first
+# (the machine-readable form, intended for tooling):
+git diff | hunkpick list --json
+git diff | hunkpick select @8002dd73f0dfd2f4 @bf7bdaaf30c1e2d4 src/lib.rs:2 | git apply --cached
 ```
 
 A binary file referenced by any selector index is emitted whole.
@@ -246,7 +260,9 @@ a bare set.
 `list` reports a 16-hex **content id** for every sub-hunk, also accepted by `select`
 as `@<id>`. The id is a hash of the file paths and the sub-hunk's **changed (`+`/`-`)
 lines only** — **not** its context lines, the `@@` line numbers, or the section header.
-Ids are matched case-insensitively.
+Ids are matched case-insensitively. Because the file path is part of the hash, ids
+work across a multi-file diff: an `@<id>` addresses the change in its own file, and the
+same edit applied to a different file gets a different id.
 
 Because only the changed lines feed the id, it is stable across a re-diff in every
 common case of an iterative `diff → stage → re-diff` loop:
