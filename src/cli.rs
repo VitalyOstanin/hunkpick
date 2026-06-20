@@ -4,6 +4,51 @@ use std::path::PathBuf;
 /// Default maximum input size in bytes (64 MiB).
 pub const DEFAULT_MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Shown after the options on `hunkpick --help` (the full, long help).
+const AFTER_LONG_HELP: &str = "\
+Examples:
+  # List addressable sub-hunks: 1-based per-file index + 16-hex content id
+  git diff src/main.rs | hunkpick list
+
+  # Machine-readable listing (adds id_count: how many sub-hunks share an id)
+  git diff src/main.rs | hunkpick list --json
+
+  # Stage sub-hunks 1 and 3 of a single-file diff
+  git diff src/main.rs | hunkpick select 1,3 | git apply --cached
+
+  # Multi-file diff: address sub-hunks per path; ranges with A-B
+  git diff | hunkpick select src/main.rs:1,3 src/lib.rs:2-4 | git apply --cached
+
+  # Every sub-hunk of a file (or of a single-file diff)
+  git diff | hunkpick select src/main.rs:* | git apply --cached
+
+  # Split original hunk 1 at new-file line 5 (cut point must be a context line)
+  git diff src/lib.rs | hunkpick split 1 --at 5
+
+Content ids (@<id>):
+  Every sub-hunk in `list` output carries a stable 16-hex content id, also
+  accepted by `select` as @<id>. The id hashes only the file path and the
+  sub-hunk's changed (+/-) lines -- not its context or the @@ line numbers --
+  so it survives a re-diff even when staging a neighbour renumbers the bare
+  indices or rewrites the surrounding context. Capture it once, reuse it across
+  the whole diff -> stage -> re-diff loop. (Byte-identical changes share an id;
+  `list --json` reports id_count, 1 = unique.)
+
+  # Select by content id (stable across re-diffs)
+  git diff | hunkpick select @8002dd73f0dfd2f4 | git apply --cached
+
+  # Stage change groups one at a time, re-running git diff each round; the ids
+  # stay valid even though the bare indices renumber after every stage.
+  git diff src/x.js | hunkpick select @bf7bdaaf30c1e2d4 | git apply --cached && git commit -m 'fix: ...'
+  git diff src/x.js | hunkpick select @058b36528575a870 | git apply --cached && git commit -m 'feat: ...'
+
+Each subcommand has its own detailed --help (full selector grammar, content-id
+rules, verification flags):
+  hunkpick list --help | hunkpick select --help | hunkpick split --help";
+
+/// Shown after the options on the short `hunkpick -h`.
+const AFTER_SHORT_HELP: &str = "Run 'hunkpick --help' for examples and content-id usage.";
+
 /// Pick and split unified-diff hunks.
 ///
 /// hunkpick is a non-interactive filter: it reads a unified diff from stdin (or `-i FILE`)
@@ -16,7 +61,12 @@ pub const DEFAULT_MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 /// to cut one hunk at given lines. Run `hunkpick <command> --help` for selector syntax,
 /// content ids, and verification flags.
 #[derive(Parser, Debug)]
-#[command(name = "hunkpick", version)]
+#[command(
+    name = "hunkpick",
+    version,
+    after_help = AFTER_SHORT_HELP,
+    after_long_help = AFTER_LONG_HELP
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
