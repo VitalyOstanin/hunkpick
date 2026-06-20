@@ -202,8 +202,9 @@ is captured once and never re-read:
 # 1. Capture the ids once. `id_count` flags any id that selects more than one.
 git diff src/indicator.js | hunkpick list --json
 
-# 2. Stage and commit each group by @id, re-running git diff each round. The ids
-#    from step 1 remain valid even though staging renumbers the bare indices.
+# 2. Stage and commit each group by @id (one or more ids each), re-running git
+#    diff each round. The ids from step 1 remain valid even though staging
+#    renumbers the bare indices.
 git diff src/indicator.js | hunkpick select @bf7bdaaf30c1e2d4 | git apply --cached
 git commit -m "fix: ..."
 
