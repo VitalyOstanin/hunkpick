@@ -5,6 +5,15 @@ use std::fmt;
 pub enum SplitError {
     NotAContextLine(u32),
     OutOfRange(u32),
+    /// An `INDEX@lo-hi` range references added lines outside `1..=added` of the sub-hunk.
+    AddedLineOutOfRange {
+        lo: usize,
+        hi: usize,
+        added: usize,
+    },
+    /// An `INDEX@lo-hi` cut would fall on a context or deletion line rather than between two
+    /// additions. Carries the 1-based added-line number at the offending boundary.
+    NotAnAdditionBoundary(usize),
 }
 
 impl fmt::Display for SplitError {
@@ -14,6 +23,15 @@ impl fmt::Display for SplitError {
                 write!(f, "new-file line {n} is a change line, not a context line")
             }
             SplitError::OutOfRange(n) => write!(f, "new-file line {n} is out of range"),
+            SplitError::AddedLineOutOfRange { lo, hi, added } => write!(
+                f,
+                "added-line range {lo}-{hi} is out of range (sub-hunk has {added} added line(s))"
+            ),
+            SplitError::NotAnAdditionBoundary(n) => write!(
+                f,
+                "cannot cut at added line {n}: the cut would fall on a context or deletion line, \
+                 not between two additions"
+            ),
         }
     }
 }
@@ -88,6 +106,41 @@ pub fn split_hunk_at(h: &Hunk, new_line_cuts: &[u32]) -> Result<Vec<Hunk>, Split
     ends.push(n);
     starts.extend(cut_indices.iter().map(|&ci| ci + 1));
     Ok(rebuild_pieces(h, &starts, &ends))
+}
+
+/// Cut one sub-hunk to the inclusive added-line range `[lo, hi]` (1-based over the sub-hunk's
+/// added lines). The cut is allowed only on an addition|addition boundary; deletions and
+/// surrounding context attach to the first piece (when `lo == 1`) and the trailing piece
+/// (when `hi == A`), so concatenating the pieces of one sub-hunk reproduces it. A pure-addition
+/// piece becomes `@@ -L,0 +M,k @@` at the shared old anchor `L`.
+pub fn slice_added_range(h: &Hunk, lo: usize, hi: usize) -> Result<Hunk, SplitError> {
+    // Absolute indices (in h.lines) of every added line.
+    let add_pos: Vec<usize> = h
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| matches!(l.kind, LineKind::Add))
+        .map(|(i, _)| i)
+        .collect();
+    let a = add_pos.len();
+    if lo < 1 || lo > hi || hi > a {
+        return Err(SplitError::AddedLineOutOfRange { lo, hi, added: a });
+    }
+    let p_lo = add_pos[lo - 1];
+    let p_hi = add_pos[hi - 1];
+    // Left cut: when not starting at the first added line, the line immediately before the
+    // first selected addition must itself be an addition (an addition|addition boundary).
+    if lo > 1 && !matches!(h.lines[p_lo - 1].kind, LineKind::Add) {
+        return Err(SplitError::NotAnAdditionBoundary(lo));
+    }
+    // Right cut: when not ending at the last added line, the line immediately after the last
+    // selected addition must be an addition.
+    if hi < a && !matches!(h.lines[p_hi + 1].kind, LineKind::Add) {
+        return Err(SplitError::NotAnAdditionBoundary(hi + 1));
+    }
+    let start = if lo == 1 { 0 } else { p_lo };
+    let end = if hi == a { h.lines.len() } else { p_hi + 1 };
+    Ok(rebuild_subhunk(h, &h.lines[start..end], start))
 }
 
 /// Indices of maximal Add/Del runs as (start, end_exclusive).
@@ -357,6 +410,178 @@ diff --git a/f b/f
             "git apply --check failed for combined explicit-split patch:\n{}",
             String::from_utf8_lossy(&diff)
         );
+    }
+
+    const PURE_ADD: &str = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -0,0 +1,4 @@
++l1
++l2
++l3
++l4
+";
+
+    const MIXED: &str = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,2 +1,4 @@
+ ctx
+-a
++b
++c
++d
+";
+
+    #[test]
+    fn slice_pure_addition_first_part() {
+        // Added lines: l1=1 l2=2 l3=3 l4=4. Take 1..2.
+        let h = hunk(PURE_ADD);
+        let part = slice_added_range(&h, 1, 2).unwrap();
+        assert_eq!(part.old_start, 0);
+        assert_eq!(part.old_lines, 0);
+        assert_eq!(part.new_start, 1);
+        assert_eq!(part.new_lines, 2);
+        let added: Vec<_> = part
+            .lines
+            .iter()
+            .filter(|l| l.kind == LineKind::Add)
+            .map(|l| l.text.clone())
+            .collect();
+        assert_eq!(added, vec![b"l1".to_vec(), b"l2".to_vec()]);
+    }
+
+    #[test]
+    fn slice_pure_addition_second_part_anchor() {
+        // Take 3..4: a pure insertion at the same old anchor (old_lines == 0).
+        let h = hunk(PURE_ADD);
+        let part = slice_added_range(&h, 3, 4).unwrap();
+        assert_eq!(part.old_lines, 0);
+        assert_eq!(part.new_lines, 2);
+        let added: Vec<_> = part
+            .lines
+            .iter()
+            .filter(|l| l.kind == LineKind::Add)
+            .map(|l| l.text.clone())
+            .collect();
+        assert_eq!(added, vec![b"l3".to_vec(), b"l4".to_vec()]);
+    }
+
+    #[test]
+    fn slice_full_range_ok() {
+        let h = hunk(PURE_ADD);
+        assert!(slice_added_range(&h, 1, 4).is_ok());
+    }
+
+    #[test]
+    fn slice_out_of_range_errors() {
+        let h = hunk(PURE_ADD); // 4 added lines
+        assert!(matches!(
+            slice_added_range(&h, 1, 5),
+            Err(SplitError::AddedLineOutOfRange {
+                lo: 1,
+                hi: 5,
+                added: 4
+            })
+        ));
+        assert!(matches!(
+            slice_added_range(&h, 0, 1),
+            Err(SplitError::AddedLineOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn slice_mixed_first_part_keeps_deletion_and_context() {
+        // Added lines in MIXED: b=1 c=2 d=3. Take 1..2 -> keeps leading ctx + deletion.
+        let h = hunk(MIXED);
+        let part = slice_added_range(&h, 1, 2).unwrap();
+        // old side: ctx + del = 2; new side: ctx + 2 adds = 3.
+        assert_eq!(part.old_lines, 2);
+        assert_eq!(part.new_lines, 3);
+        assert!(part
+            .lines
+            .iter()
+            .any(|l| l.kind == LineKind::Del && l.text == b"a"));
+    }
+
+    #[test]
+    fn slice_mixed_tail_is_pure_insertion() {
+        // Take 3..3 (just +d): pure insertion, no deletion/context attached.
+        let h = hunk(MIXED);
+        let part = slice_added_range(&h, 3, 3).unwrap();
+        assert_eq!(part.old_lines, 0);
+        assert_eq!(part.new_lines, 1);
+        assert!(part.lines.iter().all(|l| l.kind == LineKind::Add));
+    }
+
+    #[test]
+    fn slice_rejects_non_addition_boundary() {
+        // A run where additions are split by a deletion: +x -y +z.
+        let h = hunk(
+            "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,1 +1,2 @@
++x
+-y
++z
+",
+        );
+        // Added lines: x=1, z=2. Taking just 2 (+z) would cut between +x and -y|+z:
+        // the line before +z is the deletion -y, not an addition.
+        assert!(matches!(
+            slice_added_range(&h, 2, 2),
+            Err(SplitError::NotAnAdditionBoundary(_))
+        ));
+    }
+
+    #[test]
+    fn slice_roundtrip_concatenates_to_original() {
+        // Cutting PURE_ADD into [1-2] + [3-4] and concatenating reproduces the original body.
+        let h = hunk(PURE_ADD);
+        let p1 = slice_added_range(&h, 1, 2).unwrap();
+        let p2 = slice_added_range(&h, 3, 4).unwrap();
+        let mut combined = p1.lines.clone();
+        combined.extend(p2.lines.clone());
+        assert_eq!(combined, h.lines);
+    }
+
+    #[test]
+    fn slice_pieces_apply_independently_via_git() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let h = hunk(PURE_ADD);
+        // Two pieces covering the file-creation block; each must apply on its own.
+        for (lo, hi) in [(1usize, 2usize), (3, 4)] {
+            let piece = slice_added_range(&h, lo, hi).unwrap();
+            let diff = assemble(&[piece]);
+            let dir = tempfile::tempdir().unwrap();
+            // PURE_ADD is `@@ -0,0 +1,4 @@`: applies to an empty file `f`.
+            std::fs::write(dir.path().join("f"), "").unwrap();
+            Command::new("git")
+                .arg("init")
+                .arg("-q")
+                .current_dir(&dir)
+                .status()
+                .unwrap();
+            let mut child = Command::new("git")
+                .arg("apply")
+                .arg("--check")
+                .current_dir(&dir)
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(&diff).unwrap();
+            assert!(
+                child.wait().unwrap().success(),
+                "piece {lo}-{hi} failed to apply:\n{}",
+                String::from_utf8_lossy(&diff)
+            );
+        }
     }
 
     #[test]
