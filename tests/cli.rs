@@ -1,5 +1,7 @@
 // Integration tests for hunkpick CLI behaviour using inline fixtures.
 
+mod common;
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 
@@ -188,4 +190,101 @@ fn no_verify_internal_flag_accepted() {
         .assert()
         .success()
         .stdout(predicate::str::contains("+B"));
+}
+
+// ---------------------------------------------------------------------------
+// range selector (INDEX@lo-hi) end-to-end tests
+// ---------------------------------------------------------------------------
+
+/// A file-creation diff: four added lines, one atomic addition-only sub-hunk.
+const NEW_FILE_DIFF: &str = "\
+diff --git a/new.txt b/new.txt
+new file mode 100644
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1,4 @@
++l1
++l2
++l3
++l4
+";
+
+#[test]
+fn select_added_line_range_first_part() {
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "1@1-2"])
+        .write_stdin(NEW_FILE_DIFF)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("+l1"))
+        .stdout(predicate::str::contains("+l2"))
+        .stdout(predicate::str::contains("+l3").not())
+        .stdout(predicate::str::contains("+l4").not());
+}
+
+#[test]
+fn select_added_line_range_open_end() {
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "1@3-"])
+        .write_stdin(NEW_FILE_DIFF)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("+l3"))
+        .stdout(predicate::str::contains("+l4"))
+        .stdout(predicate::str::contains("+l2").not());
+}
+
+#[test]
+fn select_range_out_of_range_is_usage_error() {
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "1@1-99"])
+        .write_stdin(NEW_FILE_DIFF)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("out of range"));
+}
+
+#[test]
+fn range_split_new_file_first_part_stages_only_those_lines() {
+    let dir = common::repo_with(&[]); // empty initial commit
+    std::fs::write(dir.path().join("new.txt"), "l1\nl2\nl3\nl4\n").unwrap();
+    common::sys(&dir, &["add", "-N", "new.txt"]); // intent-to-add: diff shows file creation
+    let diff = {
+        let out = std::process::Command::new("git")
+            .args(["diff"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    let part1 = Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "1@1-2"])
+        .write_stdin(diff.clone())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let mut apply = std::process::Command::new("git")
+        .args(["apply", "--cached"])
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    apply.stdin.take().unwrap().write_all(&part1).unwrap();
+    assert!(apply.wait().unwrap().success(), "first apply failed");
+
+    let staged = common::diff_staged(&dir);
+    assert!(
+        staged.contains("+l1") && staged.contains("+l2"),
+        "staged: {staged}"
+    );
+    assert!(!staged.contains("+l3"), "l3 must not be staged: {staged}");
 }

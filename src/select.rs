@@ -1,5 +1,6 @@
 use crate::model::*;
 use crate::split::auto_split_hunk;
+use crate::split::slice_added_range;
 use crate::subhunk_id::subhunk_hash;
 use std::fmt;
 
@@ -14,12 +15,27 @@ pub enum Selector {
     Id(String),
 }
 
+/// An inclusive added-line range within one sub-hunk. `None` is an open end: `lo == None`
+/// means "from the first added line", `hi == None` means "to the last added line". The
+/// concrete bounds are resolved in `select` against the sub-hunk's added-line count.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct LineRange {
+    pub lo: Option<usize>,
+    pub hi: Option<usize>,
+}
+
 /// The index part of a `File` selector: either an explicit list of 1-based indices or `*`,
 /// meaning every sub-hunk of the addressed file.
 #[derive(Debug, PartialEq, Eq)]
 pub enum IndexSet {
     All,
     List(Vec<usize>),
+    /// `INDEX@RANGE`: one sub-hunk cut to an added-line range. Only a numeric index may
+    /// precede `@` (no content-id, no `*`).
+    Ranged {
+        index: usize,
+        lines: LineRange,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -34,6 +50,9 @@ pub enum SelectError {
     /// collision between distinct changes). Carries the colliding id.
     IdCollision(String),
     EmptySelection,
+    /// An `INDEX@lo-hi` range could not be applied to the addressed sub-hunk (carries the
+    /// underlying reason from `split::slice_added_range`).
+    Range(String),
 }
 
 impl fmt::Display for SelectError {
@@ -49,6 +68,7 @@ impl fmt::Display for SelectError {
                 "id {id} collides between distinct sub-hunks; address them by path:N instead"
             ),
             SelectError::EmptySelection => write!(f, "selection is empty"),
+            SelectError::Range(m) => write!(f, "range selector: {m}"),
         }
     }
 }
@@ -84,7 +104,8 @@ pub fn build_view(patch: &Patch) -> Vec<(usize, Vec<Hunk>)> {
 /// 1. `path:set` — `set` is `*` or a comma-separated list of indices/ranges (`1,3`, `2-4`,
 ///    `src/f:1,3-5`, `src/f:*`). Recognised when a ':' is present and the text after the LAST
 ///    ':' parses as a valid set; the path may itself contain ':' or a leading '@'.
-/// 2. `@id` — address sub-hunks by content id.
+/// 2. `@id` — address sub-hunks by content id (a non-empty hex string; the leading `@` is
+///    only the id form when the rest is all hex digits).
 /// 3. bare `set` — `*` or an index list, for single-file diffs (the path is resolved later).
 pub fn parse_selectors(args: &[String]) -> Result<Vec<Selector>, SelectError> {
     let mut out = Vec::new();
@@ -102,9 +123,10 @@ pub fn parse_selectors(args: &[String]) -> Result<Vec<Selector>, SelectError> {
                 }
             }
         }
-        // 2. @id form.
+        // 2. @id form. The id must be a non-empty hex string; any other character (including
+        //    a second '@') is not a valid id character and is rejected as a bad selector.
         if let Some(id) = a.strip_prefix('@') {
-            if id.is_empty() {
+            if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
                 return Err(SelectError::BadSelector(a.clone()));
             }
             out.push(Selector::Id(id.to_string()));
@@ -120,12 +142,72 @@ pub fn parse_selectors(args: &[String]) -> Result<Vec<Selector>, SelectError> {
     Ok(out)
 }
 
-/// Parse the index part of a `File` selector: `*` (all) or a comma-separated index list.
+/// Parse the index part of a `File` selector: `*` (all), `INDEX@RANGE` (one sub-hunk cut to
+/// an added-line range), or a comma-separated index list.
 fn parse_index_set(s: &str) -> Result<IndexSet, ()> {
     if s == "*" {
         return Ok(IndexSet::All);
     }
+    // `INDEX@RANGE`: a numeric index, then '@', then the added-line range. Checked before the
+    // index-list form so the '@' is not mistaken for a malformed list entry. Only a numeric
+    // index may precede '@' — `@id` (content id) is a different form handled in parse_selectors
+    // (it starts with '@', so it never reaches here as `INDEX@...`).
+    if let Some((idx, range)) = s.split_once('@') {
+        let index: usize = idx.parse().map_err(|_| ())?;
+        if index == 0 {
+            return Err(());
+        }
+        let lines = parse_line_range(range)?;
+        return Ok(IndexSet::Ranged { index, lines });
+    }
     parse_index_list(s).map(IndexSet::List)
+}
+
+/// Parse an added-line range: `lo-hi`, `lo-`, `-hi`, or a single `N` (== `N-N`). Bounds are
+/// 1-based and non-zero; an open end is `None`. Rejects empty input, a bare `-`, a reversed
+/// range, and non-numeric bounds.
+fn parse_line_range(s: &str) -> Result<LineRange, ()> {
+    if s.is_empty() {
+        return Err(());
+    }
+    if let Some((lo_s, hi_s)) = s.split_once('-') {
+        let lo = parse_opt_pos(lo_s)?;
+        let hi = parse_opt_pos(hi_s)?;
+        if lo.is_none() && hi.is_none() {
+            return Err(()); // both ends empty: input is "-" (or "--", etc.)
+        }
+        if let (Some(l), Some(h)) = (lo, hi) {
+            if h < l {
+                return Err(());
+            }
+        }
+        Ok(LineRange { lo, hi })
+    } else {
+        let n = parse_pos(s)?;
+        Ok(LineRange {
+            lo: Some(n),
+            hi: Some(n),
+        })
+    }
+}
+
+/// Parse a 1-based, non-zero position.
+fn parse_pos(s: &str) -> Result<usize, ()> {
+    let n: usize = s.parse().map_err(|_| ())?;
+    if n == 0 {
+        Err(())
+    } else {
+        Ok(n)
+    }
+}
+
+/// Parse an optional position: empty string is an open end (`None`).
+fn parse_opt_pos(s: &str) -> Result<Option<usize>, ()> {
+    if s.is_empty() {
+        Ok(None)
+    } else {
+        parse_pos(s).map(Some)
+    }
 }
 
 /// Upper bound on the number of indices a selector may materialise. The real sub-hunk
@@ -186,40 +268,83 @@ pub(crate) fn all_same_content(items: &[(&FileDiff, &Hunk)]) -> bool {
     })
 }
 
+/// One resolved selection within a file: a whole sub-hunk, or a sub-hunk cut to a (already
+/// resolved, 1-based, inclusive) added-line range.
+#[derive(Clone, Copy)]
+enum Chosen {
+    Whole(usize),
+    Ranged { index: usize, lo: usize, hi: usize },
+}
+
+impl Chosen {
+    fn index(&self) -> usize {
+        match self {
+            Chosen::Whole(i) => *i,
+            Chosen::Ranged { index, .. } => *index,
+        }
+    }
+}
+
 pub fn select(patch: &Patch, selectors: &[Selector]) -> Result<Patch, SelectError> {
     use std::collections::BTreeMap;
     // Auto-split lazily, only for files a selector actually names, and cache by file index so
     // each referenced file is split once (selectors may target the same file repeatedly).
     let mut subs_cache: BTreeMap<usize, Vec<Hunk>> = BTreeMap::new();
-    let mut chosen: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let mut chosen: BTreeMap<usize, Vec<Chosen>> = BTreeMap::new();
 
     for sel in selectors {
         match sel {
             Selector::Id(id) => resolve_id(patch, id, &mut subs_cache, &mut chosen)?,
             Selector::File { path, indices } => {
                 let fi = resolve_file(patch, path.as_deref())?;
-                // A binary file has no sub-hunks; any selector (`N`, `*`) picks the whole
-                // binary change. Recording the file index is enough — emission clones the
-                // binary body regardless of indices.
+                // A binary file has no sub-hunks; a non-range selector picks the whole binary
+                // change. A range selector makes no sense for a binary file.
                 if matches!(patch.files[fi].content, FileContent::Binary(_)) {
+                    if let IndexSet::Ranged { .. } = indices {
+                        return Err(SelectError::Range(format!(
+                            "{} is a binary file",
+                            patch.files[fi].display_path()
+                        )));
+                    }
                     chosen.entry(fi).or_default();
                     continue;
                 }
                 let subs = subs_cache
                     .entry(fi)
                     .or_insert_with(|| build_file_subs(&patch.files[fi]));
-                let idxs: Vec<usize> = match indices {
-                    IndexSet::All => (1..=subs.len()).collect(),
-                    IndexSet::List(v) => v.clone(),
-                };
-                for idx in idxs {
-                    if idx > subs.len() {
-                        let pname = path
-                            .clone()
-                            .unwrap_or_else(|| patch.files[fi].display_path());
-                        return Err(SelectError::NoIndex(format!("{pname}:{idx}")));
+                match indices {
+                    IndexSet::All => {
+                        for i in 1..=subs.len() {
+                            chosen.entry(fi).or_default().push(Chosen::Whole(i));
+                        }
                     }
-                    chosen.entry(fi).or_default().push(idx);
+                    IndexSet::List(v) => {
+                        for &idx in v {
+                            if idx > subs.len() {
+                                let pname = path
+                                    .clone()
+                                    .unwrap_or_else(|| patch.files[fi].display_path());
+                                return Err(SelectError::NoIndex(format!("{pname}:{idx}")));
+                            }
+                            chosen.entry(fi).or_default().push(Chosen::Whole(idx));
+                        }
+                    }
+                    IndexSet::Ranged { index, lines } => {
+                        if *index > subs.len() {
+                            let pname = path
+                                .clone()
+                                .unwrap_or_else(|| patch.files[fi].display_path());
+                            return Err(SelectError::NoIndex(format!("{pname}:{index}")));
+                        }
+                        let (added, _) = subs[*index - 1].change_counts();
+                        let lo = lines.lo.unwrap_or(1);
+                        let hi = lines.hi.unwrap_or(added as usize);
+                        chosen.entry(fi).or_default().push(Chosen::Ranged {
+                            index: *index,
+                            lo,
+                            hi,
+                        });
+                    }
                 }
             }
         }
@@ -229,15 +354,29 @@ pub fn select(patch: &Patch, selectors: &[Selector]) -> Result<Patch, SelectErro
     }
 
     let mut files = Vec::new();
-    for (fi, mut idxs) in chosen {
-        idxs.sort_unstable();
-        idxs.dedup();
+    for (fi, mut picks) in chosen {
+        // Order by sub-hunk index so emitted hunks are in old-file order (non-overlapping).
+        picks.sort_by_key(|c| c.index());
+        // Drop exact duplicate whole selections (a sub-hunk named twice). Ranged picks are
+        // left as-is — they are explicit per-range requests.
+        picks.dedup_by(|a, b| matches!((a, b), (Chosen::Whole(x), Chosen::Whole(y)) if x == y));
         let src = &patch.files[fi];
         let content = match &src.content {
             FileContent::Binary(b) => FileContent::Binary(b.clone()),
             FileContent::Text(_) => {
                 let subs = &subs_cache[&fi];
-                FileContent::Text(idxs.iter().map(|&i| subs[i - 1].clone()).collect())
+                let mut hunks = Vec::with_capacity(picks.len());
+                for pick in picks {
+                    match pick {
+                        Chosen::Whole(i) => hunks.push(subs[i - 1].clone()),
+                        Chosen::Ranged { index, lo, hi } => {
+                            let cut = slice_added_range(&subs[index - 1], lo, hi)
+                                .map_err(|e| SelectError::Range(e.to_string()))?;
+                            hunks.push(cut);
+                        }
+                    }
+                }
+                FileContent::Text(hunks)
             }
         };
         files.push(FileDiff {
@@ -258,7 +397,7 @@ fn resolve_id(
     patch: &Patch,
     id: &str,
     subs_cache: &mut std::collections::BTreeMap<usize, Vec<Hunk>>,
-    chosen: &mut std::collections::BTreeMap<usize, Vec<usize>>,
+    chosen: &mut std::collections::BTreeMap<usize, Vec<Chosen>>,
 ) -> Result<(), SelectError> {
     // Compare 64-bit hashes rather than rendered hex strings to avoid an allocation per
     // sub-hunk across the full scan. `from_str_radix` accepts upper- or lowercase hex.
@@ -287,7 +426,7 @@ fn resolve_id(
         return Err(SelectError::IdCollision(id.to_string()));
     }
     for (fi, si) in matched {
-        chosen.entry(fi).or_default().push(si);
+        chosen.entry(fi).or_default().push(Chosen::Whole(si));
     }
     Ok(())
 }
@@ -675,6 +814,153 @@ diff --git a/f b/f
     fn resolve_hunk_addresses_original_hunk() {
         let p = parse(MULTI.as_bytes()).unwrap();
         assert_eq!(resolve_hunk(&p, "1").unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn parse_range_selector_basic() {
+        let sels = parse_selectors(&["1@1-90".to_string()]).unwrap();
+        assert_eq!(
+            sels[0],
+            Selector::File {
+                path: None,
+                indices: IndexSet::Ranged {
+                    index: 1,
+                    lines: LineRange {
+                        lo: Some(1),
+                        hi: Some(90)
+                    },
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_range_open_ends_and_single() {
+        let open_hi = parse_selectors(&["1@91-".to_string()]).unwrap();
+        assert_eq!(
+            open_hi[0],
+            Selector::File {
+                path: None,
+                indices: IndexSet::Ranged {
+                    index: 1,
+                    lines: LineRange {
+                        lo: Some(91),
+                        hi: None
+                    }
+                },
+            }
+        );
+        let open_lo = parse_selectors(&["1@-90".to_string()]).unwrap();
+        assert_eq!(
+            open_lo[0],
+            Selector::File {
+                path: None,
+                indices: IndexSet::Ranged {
+                    index: 1,
+                    lines: LineRange {
+                        lo: None,
+                        hi: Some(90)
+                    }
+                },
+            }
+        );
+        let single = parse_selectors(&["2@5".to_string()]).unwrap();
+        assert_eq!(
+            single[0],
+            Selector::File {
+                path: None,
+                indices: IndexSet::Ranged {
+                    index: 2,
+                    lines: LineRange {
+                        lo: Some(5),
+                        hi: Some(5)
+                    }
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_range_selector_with_path() {
+        let sels = parse_selectors(&["src/f:1@1-90".to_string()]).unwrap();
+        assert_eq!(
+            sels[0],
+            Selector::File {
+                path: Some("src/f".to_string()),
+                indices: IndexSet::Ranged {
+                    index: 1,
+                    lines: LineRange {
+                        lo: Some(1),
+                        hi: Some(90)
+                    }
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_range_rejects_malformed() {
+        // index 0, empty range, reversed range, bare '-', non-numeric, id-form before '@'
+        assert!(parse_selectors(&["0@1-2".to_string()]).is_err());
+        assert!(parse_selectors(&["1@".to_string()]).is_err());
+        assert!(parse_selectors(&["1@5-2".to_string()]).is_err());
+        assert!(parse_selectors(&["1@-".to_string()]).is_err());
+        assert!(parse_selectors(&["1@a-b".to_string()]).is_err());
+        // Zero is not a valid 1-based added-line bound, in either position.
+        assert!(parse_selectors(&["1@0-5".to_string()]).is_err());
+        assert!(parse_selectors(&["1@5-0".to_string()]).is_err());
+        assert!(parse_selectors(&["1@0".to_string()]).is_err());
+        // '@id@range' is NOT supported: only a numeric index may precede '@'.
+        assert!(parse_selectors(&["@deadbeef@1-2".to_string()]).is_err());
+    }
+
+    const PURE_ADD_FILE: &str = "\
+diff --git a/f b/f
+new file mode 100644
+--- /dev/null
++++ b/f
+@@ -0,0 +1,4 @@
++l1
++l2
++l3
++l4
+";
+
+    #[test]
+    fn select_range_first_two_added_lines() {
+        let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
+        let sels = parse_selectors(&["1@1-2".to_string()]).unwrap();
+        let out = select(&p, &sels).unwrap();
+        let text = String::from_utf8(emit(&out)).unwrap();
+        assert!(text.contains("+l1"));
+        assert!(text.contains("+l2"));
+        assert!(!text.contains("+l3"));
+        assert!(!text.contains("+l4"));
+    }
+
+    #[test]
+    fn select_range_open_end_resolves_to_last() {
+        let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
+        let sels = parse_selectors(&["1@3-".to_string()]).unwrap();
+        let out = select(&p, &sels).unwrap();
+        let text = String::from_utf8(emit(&out)).unwrap();
+        assert!(!text.contains("+l2"));
+        assert!(text.contains("+l3"));
+        assert!(text.contains("+l4"));
+    }
+
+    #[test]
+    fn select_range_out_of_range_errors() {
+        let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
+        let sels = parse_selectors(&["1@1-99".to_string()]).unwrap();
+        assert!(matches!(select(&p, &sels), Err(SelectError::Range(_))));
+    }
+
+    #[test]
+    fn select_range_unknown_index_errors() {
+        let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
+        let sels = parse_selectors(&["9@1-2".to_string()]).unwrap();
+        assert!(matches!(select(&p, &sels), Err(SelectError::NoIndex(_))));
     }
 
     #[test]
