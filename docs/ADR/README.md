@@ -14,6 +14,7 @@ added as a new ADR that supersedes the earlier one rather than editing it in pla
 | [0005](0005-byte-core-and-input-validation.md) | Byte-oriented core and input validation                              | Accepted | 2026-06-19 |
 | [0006](0006-input-source-and-size-limit.md)    | Input source selection and size limit                                | Accepted | 2026-06-19 |
 | [0007](0007-content-id-and-wildcard-addressing.md) | Content-id (`@id`) and wildcard (`*`) sub-hunk addressing        | Accepted | 2026-06-19 |
+| [0008](0008-added-line-range-addressing.md)        | Added-line range addressing (`INDEX@RANGE`) in `select`          | Accepted | 2026-06-24 |
 
 ## Adding a new ADR
 

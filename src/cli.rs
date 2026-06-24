@@ -26,6 +26,11 @@ Examples:
   # Split original hunk 1 at new-file line 5 (cut point must be a context line)
   git diff src/lib.rs | hunkpick split 1 --at 5
 
+  # Split an addition-only block (e.g. a new-function block) across commits.
+  # RANGE numbers the sub-hunk's added (+) lines; only an index may precede '@'.
+  git diff src/lib.rs | hunkpick select 1@1-90 | git apply --cached
+  git diff src/lib.rs | hunkpick select 1@91-  | git apply --cached
+
 Content ids (@<id>):
   Every sub-hunk in `list` output carries a stable 16-hex content id, also
   accepted by `select` as @<id>. The id hashes only the file path and the
@@ -141,6 +146,8 @@ pub enum Command {
         ///   path:N,M        the same, within the named file
         ///   path:* | *      every sub-hunk (of `path`, or of a single-file diff)
         ///   @ID             every sub-hunk whose 16-hex content id is ID (from `list`)
+        ///   path:N@lo-hi    cut sub-hunk N of a file to its added lines lo..hi
+        ///   N@lo-hi         the same in a single-file diff (also N@lo-, N@-hi, N@N)
         ///
         /// Indices and ids come from `list`. A content id is derived from the file path and
         /// the sub-hunk's changed (+/-) lines only, ignoring context and the @@ line numbers:
@@ -151,6 +158,12 @@ pub enum Command {
         /// selected together; use path:N (guided by id_count from `list --json`) to address
         /// just one. Precedence: path:set first (a file named `@foo` stays addressable as
         /// `@foo:1`), then @ID, then a bare set.
+        ///
+        /// INDEX@RANGE cuts one addition block into pieces: RANGE numbers the sub-hunk's
+        /// added (+) lines (1-based; lo- = to the end, -hi = from the start, N = one line),
+        /// and the cut is allowed only between two added lines. Only a numeric index may
+        /// precede '@' (not @id, not *). Use it to split an otherwise atomic addition-only
+        /// sub-hunk (a new-function block or a file-creation diff) across commits.
         #[arg(verbatim_doc_comment)]
         selectors: Vec<String>,
         #[command(flatten)]
@@ -202,6 +215,7 @@ pub fn resolve_color_with(mode: ColorMode, is_tty: bool, no_color: bool) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
     use clap::Parser;
 
     #[test]
@@ -272,5 +286,15 @@ mod tests {
         // -C requires --verify-result-diff-git; clap must reject this.
         let res = Cli::try_parse_from(["hunkpick", "select", "1", "-C", "/tmp"]);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn long_help_documents_range_form() {
+        let mut cmd = Cli::command();
+        let help = cmd.render_long_help().to_string();
+        assert!(
+            help.contains("1@1-90"),
+            "long help must show a range example"
+        );
     }
 }

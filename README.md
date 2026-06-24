@@ -19,6 +19,7 @@ staging subsets of changes without interactive prompts.
   - [Staging recipe](#staging-recipe)
 - [Selectors](#selectors)
   - [Content ids](#content-ids)
+  - [Splitting an addition-only block: `INDEX@RANGE`](#splitting-an-addition-only-block-indexrange)
 - [Verification](#verification)
 - [Input handling](#input-handling)
 - [Auto-split and non-overlap](#auto-split-and-non-overlap)
@@ -289,6 +290,39 @@ For the `split` subcommand the hunk address uses the same `path:N` / `N` form, b
 `N` refers to the 1-based index over the file's **original** hunks (not auto-split
 sub-hunks). `split` does not accept `*` or `@id`.
 
+### Splitting an addition-only block: `INDEX@RANGE`
+
+A sub-hunk that is all additions — a block of new functions appended to a file, or a
+file-creation diff (`@@ -0,0 +1,N @@`) — is one atomic sub-hunk: auto-split has no context
+line inside it to cut at. To stage part of such a block, address it with a per-line range:
+
+```
+[path:]INDEX@RANGE
+```
+
+`INDEX` is the 1-based sub-hunk index from `list`. **Only a numeric index may precede `@`** —
+content ids (`@id`) and `*` are not accepted here. `RANGE` numbers the sub-hunk's **added (`+`)
+lines**, 1-based:
+
+| Form    | Meaning                          |
+|---------|----------------------------------|
+| `lo-hi` | added lines `lo` through `hi`    |
+| `lo-`   | from `lo` to the last added line |
+| `-hi`   | from the first added line to `hi` |
+| `N`     | a single added line (`N-N`)      |
+
+The cut is allowed only between two added lines; cutting where the boundary is a context or
+deletion line is an error. `list` marks freely-splittable sub-hunks (`addition_only` in
+`--json`, `[+range]` in the human listing).
+
+Example — split a new file across two commits:
+
+```sh
+git diff src/lib.rs | hunkpick list                       # the block shows +N and the [+range] marker
+git diff src/lib.rs | hunkpick select 1@1-90 | git apply --cached && git commit -m 'feat: part one'
+git diff src/lib.rs | hunkpick select 1@91-  | git apply --cached && git commit -m 'feat: part two'
+```
+
 ## Verification
 
 ### Internal consistency check (default)
@@ -401,14 +435,15 @@ original (one hunk becomes several), but the applied result is the same.
 
 | Capability                                      | filterdiff | hunkpick |
 |-------------------------------------------------|:----------:|:--------:|
-| Select whole hunks from a diff                  |     yes    |    yes   |
-| Auto-split hunks at change-run boundaries       |     no     |    yes   |
-| Address sub-hunks by per-file index             |     no     |    yes   |
-| Explicit hunk split at a named line             |     no     |    yes   |
-| Machine-readable listing (JSON)                 |     no     |    yes   |
-| Works with any diff source (not git-specific)   |     yes    |    yes   |
-| Built-in result verification                    |     no     |    yes   |
-| Binary file pass-through                        |     yes    |    yes   |
+| Binary file pass-through                        |     ✅     |    ✅    |
+| Select whole hunks from a diff                  |     ✅     |    ✅    |
+| Works with any diff source (not git-specific)   |     ✅     |    ✅    |
+| Address sub-hunks by per-file index             |     ❌     |    ✅    |
+| Auto-split hunks at change-run boundaries       |     ❌     |    ✅    |
+| Built-in result verification                    |     ❌     |    ✅    |
+| Explicit hunk split at a named line             |     ❌     |    ✅    |
+| Machine-readable listing (JSON)                 |     ❌     |    ✅    |
+| Split an addition-only block by line range      |     ❌     |    ✅    |
 
 ## Development
 
