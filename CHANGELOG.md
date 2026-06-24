@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-24
+
+### Added
+
+- `select` accepts a per-line range selector `[path:]INDEX@RANGE` that cuts one
+  sub-hunk to a range of its added (`+`) lines, where `RANGE` is `lo-hi`, `lo-`
+  (to the last added line), `-hi` (from the first), or a single `N`. This makes
+  an otherwise atomic addition-only sub-hunk — a block of new functions, or a
+  file-creation diff `@@ -0,0 +1,N @@` — splittable across commits. The cut is
+  allowed only between two added lines; only a numeric index may precede `@`
+  (content ids and `*` are not accepted as the address of a range). See
+  [ADR 0008](docs/ADR/0008-added-line-range-addressing.md).
+- `list` reports whether a sub-hunk is all additions (and therefore freely
+  cuttable at any added line): an `addition_only` boolean in `--json` output and
+  a `[+range]` marker in the human listing.
+
+### Changed
+
+- The `@id` selector now requires a non-empty hex id: a non-hex `@token` is
+  rejected at parse time as a bad selector instead of failing later at resolve
+  time. No valid 16-hex content id is affected.
+
+### Tests
+
+- Added unit and end-to-end coverage for the range selector, including a git
+  round-trip that stages part of a file-creation diff, the addition|addition
+  boundary rule, open-ended ranges, and round-trip reconstruction of a sub-hunk
+  from its pieces.
+
 ## [0.2.2] - 2026-06-20
 
 ### Changed
