@@ -18,6 +18,9 @@ struct JsonHunk {
     new_lines: u32,
     added: u32,
     deleted: u32,
+    /// True when the sub-hunk is all additions and can be cut at any added line via
+    /// `select INDEX@lo-hi`.
+    addition_only: bool,
     header: String,
     preview: String,
 }
@@ -38,6 +41,12 @@ fn header_string(h: &Hunk) -> String {
         s.push_str(&String::from_utf8_lossy(&h.section));
     }
     s
+}
+
+/// True when the sub-hunk consists solely of additions (no context, no deletions): it can be
+/// cut at any added line with `select INDEX@lo-hi`. An empty body is not addition-only.
+fn addition_only(h: &Hunk) -> bool {
+    !h.lines.is_empty() && h.lines.iter().all(|l| matches!(l.kind, LineKind::Add))
 }
 
 fn preview(h: &Hunk) -> String {
@@ -83,6 +92,7 @@ pub fn list_json(patch: &Patch) -> String {
                     new_lines: h.new_lines,
                     added,
                     deleted,
+                    addition_only: addition_only(h),
                     header: header_string(h),
                     preview: preview(h),
                 }
@@ -135,9 +145,10 @@ pub fn list_human(patch: &Patch, color: bool) -> String {
             };
             // Write directly into the output buffer rather than building a temporary
             // String per line (this runs once per sub-hunk).
+            let marker = if addition_only(h) { " [+range]" } else { "" };
             let _ = writeln!(
                 out,
-                "  {idx} {id} {}  +{added} -{deleted}  {pv}",
+                "  {idx} {id} {}  +{added} -{deleted}{marker}  {pv}",
                 header_string(h)
             );
         }
@@ -243,5 +254,69 @@ diff --git a/f b/f
         assert!(out.contains("f"));
         assert!(out.contains("[1]"));
         assert!(out.contains("[2]"));
+    }
+
+    const NEW_FILE: &str = "\
+diff --git a/f b/f
+new file mode 100644
+--- /dev/null
++++ b/f
+@@ -0,0 +1,2 @@
++x
++y
+";
+
+    #[test]
+    fn json_marks_addition_only() {
+        let p = parse(NEW_FILE.as_bytes()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
+        assert_eq!(v[0]["hunks"][0]["addition_only"], true);
+    }
+
+    #[test]
+    fn json_addition_only_false_for_mixed() {
+        let p = parse(MULTI.as_bytes()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
+        assert_eq!(v[0]["hunks"][0]["addition_only"], false);
+    }
+
+    #[test]
+    fn human_marks_addition_only() {
+        let p = parse(NEW_FILE.as_bytes()).unwrap();
+        let out = list_human(&p, false);
+        assert!(
+            out.contains("[+range]"),
+            "addition-only marker missing:\n{out}"
+        );
+    }
+
+    #[test]
+    fn human_no_marker_for_mixed() {
+        let p = parse(MULTI.as_bytes()).unwrap();
+        let out = list_human(&p, false);
+        assert!(
+            !out.contains("[+range]"),
+            "addition-only marker must not appear for a mixed sub-hunk:\n{out}"
+        );
+    }
+
+    #[test]
+    fn deletion_only_is_not_flagged() {
+        // A pure-deletion sub-hunk is not addition-only: deletions are not `LineKind::Add`.
+        let p = parse(
+            "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,2 +1,1 @@
+ keep
+-gone
+"
+            .as_bytes(),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
+        assert_eq!(v[0]["hunks"][0]["addition_only"], false);
+        assert!(!list_human(&p, false).contains("[+range]"));
     }
 }
