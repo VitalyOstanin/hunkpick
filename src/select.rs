@@ -307,16 +307,39 @@ impl Chosen {
     }
 }
 
-pub fn select(patch: &Patch, selectors: &[Selector]) -> Result<Patch, SelectError> {
-    use std::collections::BTreeMap;
-    // Auto-split lazily, only for files a selector actually names, and cache by file index so
-    // each referenced file is split once (selectors may target the same file repeatedly).
-    let mut subs_cache: BTreeMap<usize, Vec<Hunk>> = BTreeMap::new();
-    let mut chosen: BTreeMap<usize, Vec<Chosen>> = BTreeMap::new();
+/// The name to show for a file in an error message: the path as the user wrote it, or the
+/// diff's own display path when the selector carried no explicit path (a single-file diff).
+fn display_name(patch: &Patch, fi: usize, path: &Option<String>) -> String {
+    path.clone()
+        .unwrap_or_else(|| patch.files[fi].display_path())
+}
 
+pub fn select(patch: &Patch, selectors: &[Selector]) -> Result<Patch, SelectError> {
+    // Auto-split lazily, only for files a selector actually names, and cache by file index so
+    // each referenced file is split once (selectors may target the same file repeatedly). The
+    // cache is shared between the resolution and emission phases below.
+    let mut subs_cache: std::collections::BTreeMap<usize, Vec<Hunk>> =
+        std::collections::BTreeMap::new();
+    let chosen = resolve_selectors(patch, selectors, &mut subs_cache)?;
+    if chosen.is_empty() {
+        return Err(SelectError::EmptySelection);
+    }
+    emit_selection(patch, chosen, &subs_cache)
+}
+
+/// Resolution phase: turn each selector into a per-file map of chosen sub-hunks, auto-splitting
+/// (and caching, via `subs_cache`) each referenced file on demand. The cache is returned to the
+/// caller because the emission phase reuses the same splits.
+fn resolve_selectors(
+    patch: &Patch,
+    selectors: &[Selector],
+    subs_cache: &mut std::collections::BTreeMap<usize, Vec<Hunk>>,
+) -> Result<std::collections::BTreeMap<usize, Vec<Chosen>>, SelectError> {
+    let mut chosen: std::collections::BTreeMap<usize, Vec<Chosen>> =
+        std::collections::BTreeMap::new();
     for sel in selectors {
         match sel {
-            Selector::Id(id) => resolve_id(patch, id, &mut subs_cache, &mut chosen)?,
+            Selector::Id(id) => resolve_id(patch, id, subs_cache, &mut chosen)?,
             Selector::File { path, indices } => {
                 let fi = resolve_file(patch, path.as_deref())?;
                 // A binary file has no sub-hunks; a non-range selector picks the whole binary
@@ -343,23 +366,24 @@ pub fn select(patch: &Patch, selectors: &[Selector]) -> Result<Patch, SelectErro
                     IndexSet::List(v) => {
                         for &idx in v {
                             if idx > subs.len() {
-                                let pname = path
-                                    .clone()
-                                    .unwrap_or_else(|| patch.files[fi].display_path());
-                                return Err(SelectError::NoIndex(format!("{pname}:{idx}")));
+                                return Err(SelectError::NoIndex(format!(
+                                    "{}:{idx}",
+                                    display_name(patch, fi, path)
+                                )));
                             }
                             chosen.entry(fi).or_default().push(Chosen::Whole(idx));
                         }
                     }
                     IndexSet::Ranged { index, lines } => {
                         if *index > subs.len() {
-                            let pname = path
-                                .clone()
-                                .unwrap_or_else(|| patch.files[fi].display_path());
-                            return Err(SelectError::NoIndex(format!("{pname}:{index}")));
+                            return Err(SelectError::NoIndex(format!(
+                                "{}:{index}",
+                                display_name(patch, fi, path)
+                            )));
                         }
                         let (added, _) = subs[*index - 1].change_counts();
                         let lo = lines.lo.unwrap_or(1);
+                        // An open upper end (`lo-`) resolves to the sub-hunk's last added line.
                         let hi = lines.hi.unwrap_or(added as usize);
                         chosen.entry(fi).or_default().push(Chosen::Ranged {
                             index: *index,
@@ -371,25 +395,57 @@ pub fn select(patch: &Patch, selectors: &[Selector]) -> Result<Patch, SelectErro
             }
         }
     }
-    if chosen.is_empty() {
-        return Err(SelectError::EmptySelection);
-    }
+    Ok(chosen)
+}
 
+/// Emission phase: materialise the resolved selections into a result patch. Per file, order the
+/// picks, drop duplicates, reject overlapping ranges, and cut/clone each sub-hunk. `subs_cache`
+/// must already hold the splits for every referenced file (populated by `resolve_selectors`).
+fn emit_selection(
+    patch: &Patch,
+    chosen: std::collections::BTreeMap<usize, Vec<Chosen>>,
+    subs_cache: &std::collections::BTreeMap<usize, Vec<Hunk>>,
+) -> Result<Patch, SelectError> {
     let mut files = Vec::new();
     for (fi, mut picks) in chosen {
-        // Order by sub-hunk index so emitted hunks are in old-file order (non-overlapping).
-        picks.sort_by_key(|c| c.index());
-        // Drop exact duplicate whole selections (a sub-hunk named twice). Ranged picks are
-        // left as-is — they are explicit per-range requests.
-        picks.dedup_by(|a, b| matches!((a, b), (Chosen::Whole(x), Chosen::Whole(y)) if x == y));
         let src = &patch.files[fi];
         let content = match &src.content {
+            // A binary file has no sub-hunks; its picks vec is always empty.
             FileContent::Binary(b) => FileContent::Binary(b.clone()),
             FileContent::Text(_) => {
                 let subs = &subs_cache[&fi];
+                // The 1-based added-line span a pick covers within its sub-hunk: a whole
+                // sub-hunk covers all of its added lines, a range covers `lo..=hi`.
+                let span = |c: &Chosen| -> (usize, usize) {
+                    match c {
+                        Chosen::Whole(i) => (1, subs[i - 1].change_counts().0 as usize),
+                        Chosen::Ranged { lo, hi, .. } => (*lo, *hi),
+                    }
+                };
+                // Order by sub-hunk index (emitted hunks in old-file order), then by the first
+                // covered added line so several cuts of one sub-hunk emit ascending. Without the
+                // secondary key, `1@3-4 1@1-2` would emit descending and be rejected as
+                // overlapping even though the ranges are disjoint.
+                picks.sort_by_key(|c| (c.index(), span(c).0));
+                // Drop exact duplicate whole selections (a sub-hunk named twice).
+                picks.dedup_by(
+                    |a, b| matches!((a, b), (Chosen::Whole(x), Chosen::Whole(y)) if x == y),
+                );
+                // Reject picks of the same sub-hunk whose added-line spans overlap: emitting them
+                // would duplicate added lines into overlapping, inapplicable hunks. This is a
+                // selector error (exit 2), caught here before emission so it never depends on the
+                // optional internal result-diff check (`--no-verify-result-diff-internal`).
+                for w in picks.windows(2) {
+                    if w[0].index() == w[1].index() && span(&w[1]).0 <= span(&w[0]).1 {
+                        return Err(SelectError::Range(format!(
+                            "sub-hunk {} is addressed by overlapping ranges",
+                            w[0].index()
+                        )));
+                    }
+                }
                 let mut hunks = Vec::with_capacity(picks.len());
-                for pick in picks {
-                    match pick {
+                for pick in &picks {
+                    match *pick {
                         Chosen::Whole(i) => hunks.push(subs[i - 1].clone()),
                         Chosen::Ranged { index, lo, hi } => {
                             let cut = slice_added_range(&subs[index - 1], lo, hi)
@@ -1003,6 +1059,55 @@ new file mode 100644
         let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
         let sels = parse_selectors(&["9@1-2".to_string()]).unwrap();
         assert!(matches!(select(&p, &sels), Err(SelectError::NoIndex(_))));
+    }
+
+    #[test]
+    fn select_disjoint_ranges_reverse_order_emit_ascending() {
+        // Two disjoint ranges of one sub-hunk given in descending order must be reordered and
+        // emitted ascending, not rejected as overlapping (the order they happen to be typed in
+        // must not change the result).
+        let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
+        let sels = parse_selectors(&["1@3-4".to_string(), "1@1-2".to_string()]).unwrap();
+        let out = select(&p, &sels).unwrap();
+        match &out.files[0].content {
+            FileContent::Text(hunks) => {
+                assert_eq!(hunks.len(), 2);
+                // Emitted in ascending new-file order: l1,l2 piece first, then l3,l4.
+                assert_eq!(hunks[0].new_start, 1);
+                assert_eq!(hunks[1].new_start, 3);
+            }
+            _ => panic!("expected text content"),
+        }
+    }
+
+    #[test]
+    fn select_adjacent_disjoint_ranges_ok() {
+        // The same two disjoint ranges in ascending order also succeed and emit both pieces.
+        let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
+        let sels = parse_selectors(&["1@1-2".to_string(), "1@3-4".to_string()]).unwrap();
+        let out = select(&p, &sels).unwrap();
+        match &out.files[0].content {
+            FileContent::Text(hunks) => assert_eq!(hunks.len(), 2),
+            _ => panic!("expected text content"),
+        }
+    }
+
+    #[test]
+    fn select_overlapping_ranges_rejected() {
+        // `1@1-3` and `1@2-4` share added lines 2-3: emitting both would duplicate them into an
+        // inapplicable diff. This must be a selector error, not a corrupt diff.
+        let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
+        let sels = parse_selectors(&["1@1-3".to_string(), "1@2-4".to_string()]).unwrap();
+        assert!(matches!(select(&p, &sels), Err(SelectError::Range(_))));
+    }
+
+    #[test]
+    fn select_whole_and_range_of_same_subhunk_rejected() {
+        // A whole sub-hunk covers all its added lines, so any range of the same sub-hunk overlaps
+        // it. Selecting both is contradictory and rejected as a selector error.
+        let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
+        let sels = parse_selectors(&["1".to_string(), "1@1-2".to_string()]).unwrap();
+        assert!(matches!(select(&p, &sels), Err(SelectError::Range(_))));
     }
 
     #[test]

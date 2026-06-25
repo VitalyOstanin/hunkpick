@@ -288,3 +288,37 @@ fn range_split_new_file_first_part_stages_only_those_lines() {
     );
     assert!(!staged.contains("+l3"), "l3 must not be staged: {staged}");
 }
+
+#[test]
+fn select_disjoint_ranges_reverse_order_succeeds() {
+    // Two disjoint ranges of one sub-hunk typed in descending order must succeed and emit both,
+    // not be rejected for the order they were typed in.
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "1@3-4", "1@1-2"])
+        .write_stdin(NEW_FILE_DIFF)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("+l1"))
+        .stdout(predicate::str::contains("+l4"));
+}
+
+#[test]
+fn select_overlapping_ranges_exits_2_even_without_internal_verify() {
+    // Overlapping ranges of one sub-hunk are a selector error (exit 2), reported before emission.
+    // `--no-verify-result-diff-internal` disables only the result-diff self-check; it must NOT
+    // turn this into a silent success that emits a corrupt diff.
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args([
+            "select",
+            "--no-verify-result-diff-internal",
+            "1@1-3",
+            "1@2-4",
+        ])
+        .write_stdin(NEW_FILE_DIFF)
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("overlapping"));
+}
