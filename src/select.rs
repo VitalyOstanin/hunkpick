@@ -132,8 +132,10 @@ pub fn parse_selectors(args: &[String]) -> Result<Vec<Selector>, SelectError> {
             out.push(Selector::Id(id.to_string()));
             continue;
         }
-        // 3. bare set.
-        let indices = parse_index_set(a).map_err(|_| SelectError::BadSelector(a.clone()))?;
+        // 3. bare set. A parse failure here is terminal (unlike the path form above), so the
+        //    specific reason is surfaced to the user rather than discarded.
+        let indices =
+            parse_index_set(a).map_err(|e| SelectError::BadSelector(format!("{a} ({e})")))?;
         out.push(Selector::File {
             path: None,
             indices,
@@ -142,9 +144,34 @@ pub fn parse_selectors(args: &[String]) -> Result<Vec<Selector>, SelectError> {
     Ok(out)
 }
 
+/// Why an index-set selector failed to parse. Carried up so the CLI can report the specific
+/// fault — a reversed range, a zero bound, a non-numeric bound — instead of a bare
+/// "bad selector". In the `path:set` form a parse failure only signals "not this form" and the
+/// reason is discarded; it is surfaced only for a bare set (see `parse_selectors`).
+#[derive(Debug, PartialEq, Eq)]
+enum SetParseError {
+    Empty,
+    NotANumber(String),
+    ZeroBound,
+    ReversedRange { lo: usize, hi: usize },
+    TooLarge,
+}
+
+impl fmt::Display for SetParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SetParseError::Empty => write!(f, "empty index set"),
+            SetParseError::NotANumber(s) => write!(f, "not a number: {s}"),
+            SetParseError::ZeroBound => write!(f, "indices are 1-based, 0 is not valid"),
+            SetParseError::ReversedRange { lo, hi } => write!(f, "reversed range: {lo}-{hi}"),
+            SetParseError::TooLarge => write!(f, "range too large"),
+        }
+    }
+}
+
 /// Parse the index part of a `File` selector: `*` (all), `INDEX@RANGE` (one sub-hunk cut to
 /// an added-line range), or a comma-separated index list.
-fn parse_index_set(s: &str) -> Result<IndexSet, ()> {
+fn parse_index_set(s: &str) -> Result<IndexSet, SetParseError> {
     if s == "*" {
         return Ok(IndexSet::All);
     }
@@ -153,10 +180,7 @@ fn parse_index_set(s: &str) -> Result<IndexSet, ()> {
     // index may precede '@' — `@id` (content id) is a different form handled in parse_selectors
     // (it starts with '@', so it never reaches here as `INDEX@...`).
     if let Some((idx, range)) = s.split_once('@') {
-        let index: usize = idx.parse().map_err(|_| ())?;
-        if index == 0 {
-            return Err(());
-        }
+        let index = parse_pos(idx)?;
         let lines = parse_line_range(range)?;
         return Ok(IndexSet::Ranged { index, lines });
     }
@@ -166,19 +190,19 @@ fn parse_index_set(s: &str) -> Result<IndexSet, ()> {
 /// Parse an added-line range: `lo-hi`, `lo-`, `-hi`, or a single `N` (== `N-N`). Bounds are
 /// 1-based and non-zero; an open end is `None`. Rejects empty input, a bare `-`, a reversed
 /// range, and non-numeric bounds.
-fn parse_line_range(s: &str) -> Result<LineRange, ()> {
+fn parse_line_range(s: &str) -> Result<LineRange, SetParseError> {
     if s.is_empty() {
-        return Err(());
+        return Err(SetParseError::Empty);
     }
     if let Some((lo_s, hi_s)) = s.split_once('-') {
         let lo = parse_opt_pos(lo_s)?;
         let hi = parse_opt_pos(hi_s)?;
         if lo.is_none() && hi.is_none() {
-            return Err(()); // both ends empty: input is "-" (or "--", etc.)
+            return Err(SetParseError::Empty); // both ends empty: input is "-" (or "--", etc.)
         }
         if let (Some(l), Some(h)) = (lo, hi) {
             if h < l {
-                return Err(());
+                return Err(SetParseError::ReversedRange { lo: l, hi: h });
             }
         }
         Ok(LineRange { lo, hi })
@@ -192,17 +216,19 @@ fn parse_line_range(s: &str) -> Result<LineRange, ()> {
 }
 
 /// Parse a 1-based, non-zero position.
-fn parse_pos(s: &str) -> Result<usize, ()> {
-    let n: usize = s.parse().map_err(|_| ())?;
+fn parse_pos(s: &str) -> Result<usize, SetParseError> {
+    let n: usize = s
+        .parse()
+        .map_err(|_| SetParseError::NotANumber(s.to_string()))?;
     if n == 0 {
-        Err(())
+        Err(SetParseError::ZeroBound)
     } else {
         Ok(n)
     }
 }
 
 /// Parse an optional position: empty string is an open end (`None`).
-fn parse_opt_pos(s: &str) -> Result<Option<usize>, ()> {
+fn parse_opt_pos(s: &str) -> Result<Option<usize>, SetParseError> {
     if s.is_empty() {
         Ok(None)
     } else {
@@ -217,29 +243,25 @@ fn parse_opt_pos(s: &str) -> Result<Option<usize>, ()> {
 /// selector rather than an allocation.
 const MAX_SELECTOR_INDICES: usize = 1 << 20;
 
-fn parse_index_list(s: &str) -> Result<Vec<usize>, ()> {
+fn parse_index_list(s: &str) -> Result<Vec<usize>, SetParseError> {
     if s.is_empty() {
-        return Err(());
+        return Err(SetParseError::Empty);
     }
     let mut v = Vec::new();
     for part in s.split(',') {
-        if let Some((lo, hi)) = part.split_once('-') {
-            let lo: usize = lo.parse().map_err(|_| ())?;
-            let hi: usize = hi.parse().map_err(|_| ())?;
-            if lo == 0 || hi < lo {
-                return Err(());
+        if let Some((lo_s, hi_s)) = part.split_once('-') {
+            let lo = parse_pos(lo_s)?;
+            let hi = parse_pos(hi_s)?;
+            if hi < lo {
+                return Err(SetParseError::ReversedRange { lo, hi });
             }
             let span = hi - lo + 1;
             if span > MAX_SELECTOR_INDICES || v.len() + span > MAX_SELECTOR_INDICES {
-                return Err(());
+                return Err(SetParseError::TooLarge);
             }
             v.extend(lo..=hi);
         } else {
-            let n: usize = part.parse().map_err(|_| ())?;
-            if n == 0 {
-                return Err(());
-            }
-            v.push(n);
+            v.push(parse_pos(part)?);
         }
     }
     Ok(v)
@@ -896,6 +918,26 @@ diff --git a/f b/f
                 },
             }
         );
+    }
+
+    #[test]
+    fn bad_selector_reports_specific_reason() {
+        // A bare selector that fails to parse must carry *why* it failed, not a bare
+        // "bad selector": reversed range, zero bound, non-numeric bound.
+        let cases = [
+            ("1@5-2", "reversed range"),
+            ("1@0-5", "1-based"),
+            ("1@a-b", "not a number"),
+        ];
+        for (sel, needle) in cases {
+            match parse_selectors(&[sel.to_string()]) {
+                Err(SelectError::BadSelector(msg)) => assert!(
+                    msg.contains(needle),
+                    "selector {sel}: message {msg:?} lacks {needle:?}"
+                ),
+                other => panic!("selector {sel}: expected BadSelector, got {other:?}"),
+            }
+        }
     }
 
     #[test]
