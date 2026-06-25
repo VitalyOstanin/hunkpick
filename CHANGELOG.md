@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-06-25
+
+### Fixed
+
+- `select` now orders multiple `INDEX@RANGE` selectors that address the same
+  sub-hunk by their first added line, so two disjoint ranges given in any order
+  (e.g. `1@3-4 1@1-2`) emit in ascending new-file order and apply cleanly
+  instead of being rejected as overlapping.
+- Overlapping added-line ranges of one sub-hunk (e.g. `1@1-3 1@2-4`) are now
+  rejected as a selector error (exit 2) before emission, so they can no longer
+  slip past `--no-verify-result-diff-internal` as a corrupt diff.
+- A malformed selector now reports the specific reason it was rejected — a
+  reversed range, a zero bound, or a non-numeric bound — instead of a bare
+  `bad selector: <text>`.
+
+### Tests
+
+- Added unit and end-to-end coverage for range ordering, overlap rejection
+  (including under `--no-verify-result-diff-internal`), and the specific
+  bad-selector reasons.
+
 ## [0.3.0] - 2026-06-24
 
 ### Added
