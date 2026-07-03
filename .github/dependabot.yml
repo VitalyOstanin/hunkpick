@@ -1,0 +1,20 @@
+# Dependabot keeps the tag-pinned GitHub Actions in .github/workflows up to
+# date, opening one weekly pull request that bumps every action. cargo
+# dependencies are intentionally not tracked here: security advisories are
+# covered by the scheduled cargo audit (.github/workflows/audit.yml), and
+# routine crate bumps are reviewed manually to avoid a churn of per-crate
+# PRs. Only the github-actions ecosystem is configured.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Batch all action bumps into a single PR instead of one per action.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    # Match the repository's conventional-commit style (e.g. `ci: ...`).
+    commit-message:
+      prefix: "ci"

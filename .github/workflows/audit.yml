@@ -1,0 +1,44 @@
+name: Security audit
+
+# cargo audit checks the dependency tree against the RustSec advisory
+# database. A scheduled run is the point of this workflow: push/PR-triggered
+# audits only fire when the tree changes, so a newly published advisory
+# against an otherwise-unchanged dependency would go unnoticed until the next
+# commit. The weekly cron closes that gap; the Cargo.* path filters still
+# audit dependency changes immediately.
+on:
+  schedule:
+    # Weekly, Monday 03:00 UTC (06:00 Europe/Moscow).
+    - cron: '0 3 * * 1'
+  push:
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - '.github/workflows/audit.yml'
+  pull_request:
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - '.github/workflows/audit.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # rustsec/audit-check opens a tracking issue when it finds an advisory on
+  # push/schedule runs.
+  issues: write
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Security audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

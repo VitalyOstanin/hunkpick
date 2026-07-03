@@ -58,12 +58,6 @@ jobs:
       - name: Build
         run: cargo build
 
-  audit:
-    name: Security audit
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+  # The security audit lives in its own workflow (.github/workflows/audit.yml)
+  # so it can also run on a weekly schedule — a cron run catches advisories
+  # published against unchanged dependencies, which a push-only audit misses.
