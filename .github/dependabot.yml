@@ -18,3 +18,9 @@ updates:
     # Match the repository's conventional-commit style (e.g. `ci: ...`).
     commit-message:
       prefix: "ci"
+    # dtolnay/rust-toolchain refs select a Rust toolchain, not an action
+    # version: `@stable` is a rolling ref and `@1.85.0` is the intentional MSRV
+    # pin. Dependabot must not "bump" either (bumping the pin to a nonexistent
+    # Rust release breaks the MSRV job on a 404).
+    ignore:
+      - dependency-name: "dtolnay/rust-toolchain"
