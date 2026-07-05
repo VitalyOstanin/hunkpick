@@ -1,10 +1,10 @@
 [package]
 name = "hunkpick"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["Vitaly Ostanin <vitaly.ostanin@gmail.com>"]
-description = "Non-interactive unified-diff hunk picker and splitter"
+description = "Non-interactive git add -p alternative — pick and split unified-diff hunks by index, range, or content id"
 license = "MIT"
 repository = "https://github.com/VitalyOstanin/hunkpick"
 keywords = ["diff", "patch", "hunk", "git", "cli"]

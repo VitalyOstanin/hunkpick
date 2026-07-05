@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-05
+
+### Added
+
+- `select` accepts a per-line changed-line selector `[path:]INDEX@L<set>` that
+  keeps an arbitrary subset of a sub-hunk's changed (`+`/`-`) lines, where
+  `<set>` is an index list over the changed lines (`L1,3`, `L1-2,4`). Unlike
+  `INDEX@RANGE` (added-side only, cut between two `+` lines, deletions atomic),
+  it has no boundary restriction: a deletion surrounded by additions
+  (`+x -y +z`) can be isolated, and the deletions and additions of a
+  replacement can be separated across commits via the diff → stage → re-diff
+  loop. Unselected deletions are kept as context (anchoring the hunk, so the
+  old-side footprint is invariant and no `--unidiff-zero` is needed);
+  unselected additions are dropped. A sub-hunk addressed by `@L` must be
+  addressed once per invocation (exit 2 otherwise).
+- `list --json` reports a `changed_lines` array per sub-hunk —
+  `[{i, kind, text}]` with 1-based indices shared across deletions and
+  additions — the machine-readable source for building `@L` selectors without
+  parsing the diff body.
+
+### Tests
+
+- Added unit and end-to-end coverage for the line-set selector: separating
+  deletions from additions, isolating a deletion among additions, full-selection
+  round-trip, the no-newline-at-EOF re-add edge, the once-per-invocation rule,
+  and the `changed_lines` JSON numbering.
+
 ## [0.3.1] - 2026-06-25
 
 ### Fixed
