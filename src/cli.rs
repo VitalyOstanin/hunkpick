@@ -130,8 +130,11 @@ pub enum Command {
     ///
     /// Each hunk is auto-split into minimal sub-hunks (one contiguous change run each). For
     /// every sub-hunk `list` shows a 1-based per-file index and a 16-hex content id; either
-    /// can be passed to `select` (the id as `@<id>`). `--json` emits the same data as a
-    /// stable machine schema, plus `id_count` (how many sub-hunks share an id; 1 = unique)
+    /// can be passed to `select` (the id as `@<id>`). A sub-hunk that is all additions (a
+    /// file-creation or pure-append block with no context, so it is freely cuttable at any
+    /// added line with `@lo-hi`) is flagged with a `[+range]` marker in the human listing.
+    /// `--json` emits the same data as a stable machine schema, plus `id_count` (how many
+    /// sub-hunks share an id; 1 = unique), `addition_only` (that same all-additions flag),
     /// and `changed_lines` (each sub-hunk's +/- lines, 1-based in body order, for addressing
     /// with `select INDEX@L<set>`). Binary files are listed with no sub-hunks.
     List {
