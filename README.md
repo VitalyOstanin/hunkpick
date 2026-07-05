@@ -6,7 +6,9 @@
 [![license](https://img.shields.io/crates/l/hunkpick.svg)](https://github.com/VitalyOstanin/hunkpick/blob/master/LICENSE)
 
 Non-interactive unified-diff hunk picker and splitter — a pure stdin→stdout filter for
-staging subsets of changes without interactive prompts.
+staging subsets of changes without interactive prompts. It is the scriptable,
+non-interactive alternative to `git add -p`: pick or split hunks by index, range, or
+content id inside a pipeline, with no prompts and machine-readable output.
 
 ## Table of Contents
 
@@ -20,6 +22,7 @@ staging subsets of changes without interactive prompts.
 - [Selectors](#selectors)
   - [Content ids](#content-ids)
   - [Splitting an addition-only block: `INDEX@RANGE`](#splitting-an-addition-only-block-indexrange)
+  - [Splitting by individual changed lines: `INDEX@L<set>`](#splitting-by-individual-changed-lines-indexlset)
 - [Verification](#verification)
 - [Input handling](#input-handling)
 - [Auto-split and non-overlap](#auto-split-and-non-overlap)
@@ -30,8 +33,10 @@ staging subsets of changes without interactive prompts.
 
 ## Why / Motivation
 
-The standard non-interactive approach for staging a subset of hunks uses
-[`filterdiff`](https://linux.die.net/man/1/filterdiff) from the
+Git's built-in way to stage a subset of hunks is the interactive `git add -p`. It
+prompts for each hunk, so it cannot be driven from a script, a Makefile, or an
+automated coding agent. The standard **non-interactive** substitute for `git add -p`
+has been [`filterdiff`](https://linux.die.net/man/1/filterdiff) from the
 [patchutils](https://cyberelk.net/tim/software/patchutils/) suite:
 
 ```sh
@@ -137,8 +142,14 @@ The 16-hex token after the index is the sub-hunk's **content id** (see
 
 **JSON schema** (`--json`): array of file objects, each with `path`, `binary`, and
 `hunks` (array of sub-hunk objects with `index`, `id`, `id_count`, `old_start`,
-`old_lines`, `new_start`, `new_lines`, `added`, `deleted`, `header`, `preview`).
-`id_count` is how many sub-hunks across the whole patch share that `id` (`1` = unique).
+`old_lines`, `new_start`, `new_lines`, `added`, `deleted`, `addition_only`,
+`changed_lines`, `header`, `preview`). `id_count` is how many sub-hunks across the whole
+patch share that `id` (`1` = unique). `addition_only` is `true` when the sub-hunk is all
+additions (freely splittable with `INDEX@lo-hi`). `changed_lines` is the sub-hunk's
+changed (`+`/`-`) lines in body order, each `{ i, kind, text }`: `i` is the 1-based index
+for `select INDEX@L<set>`, `kind` is `"add"` or `"del"`. The `i` indices are positional —
+they renumber after each staged round, unlike the sub-hunk `id`, so re-run `list --json`
+each round (there is no stable per-line id).
 
 Binary files are listed with `"binary": true` and an empty `hunks` array.
 
@@ -245,6 +256,8 @@ sub-hunks within one file by their 1-based per-file index as reported by `list`.
 | `src/foo.rs:2-4`   | Sub-hunks 2 through 4 within `src/foo.rs`            |
 | `src/foo.rs:*`     | Every sub-hunk of `src/foo.rs`                        |
 | `@<id>`            | Every sub-hunk whose content id equals `<id>`         |
+| `1@lo-hi`          | Cut sub-hunk 1 to an added-line range (see [Splitting an addition-only block](#splitting-an-addition-only-block-indexrange)) |
+| `1@L<set>`         | Cut sub-hunk 1 to a set of changed lines (see [Splitting by individual changed lines](#splitting-by-individual-changed-lines-indexlset)) |
 
 Multiple selectors can be combined: `hunkpick select src/a.rs:1 src/b.rs:2,3`.
 
@@ -322,6 +335,52 @@ git diff src/lib.rs | hunkpick list                       # the block shows +N a
 git diff src/lib.rs | hunkpick select 1@1-90 | git apply --cached && git commit -m 'feat: part one'
 git diff src/lib.rs | hunkpick select 1@91-  | git apply --cached && git commit -m 'feat: part two'
 ```
+
+### Splitting by individual changed lines: `INDEX@L<set>`
+
+`INDEX@RANGE` only cuts on the addition side, between two added lines, so it cannot
+isolate a deletion or separate a replacement's removals from its insertions.
+`INDEX@L<set>` lifts those limits: it selects an arbitrary subset of a sub-hunk's
+**changed (`+`/`-`) lines**.
+
+`<set>` starts with `L` and then numbers the sub-hunk's changed lines `1..N` in body
+order — deletions and additions share one numbering, exactly as `list --json` reports
+them under `changed_lines`. The set is a comma-separated list of indices and ranges,
+e.g. `L1,3` or `L1-2,4`. As with `@RANGE`, only a numeric index may precede `@`.
+
+Note the two `@`-forms number differently: `@lo-hi` counts only **added** (`+`) lines,
+while `@L` counts **all changed** (`+`/`-`) lines. So `1@2-2` and `1@L2` can address
+different physical lines; the indices from `changed_lines` are for `@L` only.
+
+Each unselected deletion is kept as a context line (so the piece stays anchored and
+applies without `--unidiff-zero`), and each unselected addition is omitted. Any subset
+is therefore realisable as a single applicable hunk — there is no boundary restriction,
+so a deletion surrounded by additions (`+x -y +z`) can be isolated too.
+
+A sub-hunk addressed by `@L` must be addressed **once per invocation**: combining it with
+another `@L`, or with a whole/range selection of the same sub-hunk, is a usage error
+(exit 2) — the pieces would carry inconsistent line numbers. Stage further pieces in
+later `diff → stage → re-diff` rounds.
+
+Example — separate a replacement's removals from its insertions. `list --json` shows the
+changed lines and their indices:
+
+```json
+"changed_lines": [
+  { "i": 1, "kind": "del", "text": "a" },
+  { "i": 2, "kind": "del", "text": "b" },
+  { "i": 3, "kind": "add", "text": "A" },
+  { "i": 4, "kind": "add", "text": "B" }
+]
+```
+
+```sh
+git diff src/lib.rs | hunkpick select 1@L1,2 | git apply --cached && git commit -m 'remove a, b'
+git diff src/lib.rs | hunkpick select 1@L1,2 | git apply --cached && git commit -m 'add A, B'
+```
+
+The second round re-runs `git diff`: after the deletions are committed the sub-hunk holds
+only the two additions, now numbered 1 and 2.
 
 ## Verification
 
@@ -444,6 +503,7 @@ original (one hunk becomes several), but the applied result is the same.
 | Explicit hunk split at a named line             |     ❌     |    ✅    |
 | Machine-readable listing (JSON)                 |     ❌     |    ✅    |
 | Split an addition-only block by line range      |     ❌     |    ✅    |
+| Split any sub-hunk by individual changed lines  |     ❌     |    ✅    |
 
 ## Development
 

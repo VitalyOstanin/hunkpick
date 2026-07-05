@@ -1,4 +1,5 @@
 use crate::model::*;
+use std::collections::BTreeSet;
 use std::fmt;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -14,6 +15,16 @@ pub enum SplitError {
     /// An `INDEX@lo-hi` cut would fall on a context or deletion line rather than between two
     /// additions. Carries the 1-based added-line number at the offending boundary.
     NotAnAdditionBoundary(usize),
+    /// An `INDEX@L<set>` selection references a changed line outside `1..=changed` of the
+    /// sub-hunk. Carries the offending 1-based index and the sub-hunk's changed-line count.
+    ChangedLineOutOfRange {
+        index: usize,
+        changed: usize,
+    },
+    /// An `INDEX@L<set>` selection resolved to no changed lines (an empty set). A defensive
+    /// invariant: from the CLI an empty `@L` set is already rejected earlier by the selector
+    /// parser (`empty index set`), so this is only reachable by a direct library caller.
+    NoChangedLinesSelected,
 }
 
 impl fmt::Display for SplitError {
@@ -32,6 +43,13 @@ impl fmt::Display for SplitError {
                 "cannot cut at added line {n}: the cut would fall on a context or deletion line, \
                  not between two additions"
             ),
+            SplitError::ChangedLineOutOfRange { index, changed } => write!(
+                f,
+                "changed-line index {index} is out of range (sub-hunk has {changed} changed line(s))"
+            ),
+            SplitError::NoChangedLinesSelected => {
+                write!(f, "the selection references no changed lines")
+            }
         }
     }
 }
@@ -143,6 +161,111 @@ pub fn slice_added_range(h: &Hunk, lo: usize, hi: usize) -> Result<Hunk, SplitEr
     Ok(rebuild_subhunk(h, &h.lines[start..end], start))
 }
 
+/// Emit a piece of `h` that realises only the selected changed lines. `selected` holds 1-based
+/// indices over `h`'s changed (Add/Del) lines in body order (`1..=changed`, where
+/// `changed == added + deleted`). Each body line is rewritten:
+///   - a context line is kept as context;
+///   - a selected deletion stays a deletion; an unselected deletion becomes a context line (the
+///     line is retained in this partial application, and it anchors the resulting hunk);
+///   - a selected addition stays an addition; an unselected addition is omitted (not yet added).
+///
+/// Because unselected deletions are kept as context, every subset of changed lines is realisable
+/// as one applicable hunk — there is no addition|addition boundary restriction as in
+/// [`slice_added_range`], and a deletion split by additions (`+x -y +z`) can be addressed. The
+/// old-side footprint (`old_start`, `old_lines`) is invariant: every original context and
+/// deletion line is still present on the old side (a deletion either stays a deletion or becomes
+/// context, both counting toward `old_lines`). Errors if `selected` is empty or references a
+/// changed line outside `1..=changed`.
+pub fn slice_changed_lines(h: &Hunk, selected: &BTreeSet<usize>) -> Result<Hunk, SplitError> {
+    let changed = h
+        .lines
+        .iter()
+        .filter(|l| !matches!(l.kind, LineKind::Context))
+        .count();
+    if selected.is_empty() {
+        return Err(SplitError::NoChangedLinesSelected);
+    }
+    // `selected` is sorted (BTreeSet); parsing guarantees every index is >= 1, so only the upper
+    // bound can be out of range.
+    if let Some(&max) = selected.iter().next_back() {
+        if max > changed {
+            return Err(SplitError::ChangedLineOutOfRange {
+                index: max,
+                changed,
+            });
+        }
+    }
+    let mut lines: Vec<Line> = Vec::with_capacity(h.lines.len());
+    let mut ci = 0usize; // 1-based changed-line counter
+    for l in &h.lines {
+        match l.kind {
+            LineKind::Context => lines.push(l.clone()),
+            LineKind::Del => {
+                ci += 1;
+                if selected.contains(&ci) {
+                    lines.push(l.clone());
+                } else {
+                    // Retained line: emit as context so the hunk stays anchored.
+                    lines.push(Line {
+                        kind: LineKind::Context,
+                        text: l.text.clone(),
+                        no_newline: l.no_newline,
+                    });
+                }
+            }
+            LineKind::Add => {
+                ci += 1;
+                if selected.contains(&ci) {
+                    lines.push(l.clone());
+                }
+                // Unselected addition: omit entirely.
+            }
+        }
+    }
+    // A retained (unselected) deletion that sat at EOF became a context line still carrying the
+    // `\ No newline at end of file` flag. If it is no longer the last line — selected additions
+    // follow it — a plain context line is both malformed (a mid-hunk no-newline marker) and wrong:
+    // appending after a no-newline line requires that line to gain a trailing newline. Represent
+    // that the way git does — delete the no-newline line and re-add it with a newline — so the
+    // piece applies. A well-formed diff never carries a no-newline flag on a non-last context
+    // line, so this only ever touches lines this transform just converted from a deletion;
+    // deletions and additions keep their own flags (a valid `-a\No newline +b` at EOF round-trips).
+    let n = lines.len();
+    if lines
+        .iter()
+        .enumerate()
+        .any(|(i, l)| i + 1 < n && matches!(l.kind, LineKind::Context) && l.no_newline)
+    {
+        let mut fixed: Vec<Line> = Vec::with_capacity(lines.len() + 1);
+        for (i, l) in lines.into_iter().enumerate() {
+            if i + 1 < n && matches!(l.kind, LineKind::Context) && l.no_newline {
+                fixed.push(Line {
+                    kind: LineKind::Del,
+                    text: l.text.clone(),
+                    no_newline: true,
+                });
+                fixed.push(Line {
+                    kind: LineKind::Add,
+                    text: l.text,
+                    no_newline: false,
+                });
+            } else {
+                fixed.push(l);
+            }
+        }
+        lines = fixed;
+    }
+    let (ctx, add, del) = count_kinds(&lines);
+    Ok(Hunk {
+        old_start: h.old_start,
+        old_lines: ctx + del,
+        new_start: h.new_start,
+        new_lines: ctx + add,
+        section: h.section.clone(),
+        lines,
+    })
+}
+
 /// Indices of maximal Add/Del runs as (start, end_exclusive).
 fn change_runs(h: &Hunk) -> Vec<(usize, usize)> {
     let mut runs = Vec::new();
@@ -240,6 +363,9 @@ mod tests {
                 });
                 diff.extend_from_slice(&l.text);
                 diff.push(b'\n');
+                if l.no_newline {
+                    diff.extend_from_slice(b"\\ No newline at end of file\n");
+                }
             }
         }
         diff
@@ -614,6 +740,192 @@ diff --git a/f b/f
             child.wait().unwrap().success(),
             "git apply --check failed for split patch:\n{}",
             String::from_utf8_lossy(&diff)
+        );
+    }
+
+    /// True if the assembled patch of `subs` applies cleanly to a file `f` seeded with
+    /// `file_content` in a fresh git repo (`git apply --check`).
+    fn git_apply_ok(subs: &[Hunk], file_content: &str) -> bool {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let diff = assemble(subs);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f"), file_content).unwrap();
+        Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        let mut child = Command::new("git")
+            .arg("apply")
+            .arg("--check")
+            .current_dir(&dir)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&diff).unwrap();
+        child.wait().unwrap().success()
+    }
+
+    /// Build a BTreeSet of the given 1-based changed-line indices.
+    fn sel(indices: &[usize]) -> BTreeSet<usize> {
+        indices.iter().copied().collect()
+    }
+
+    const REPLACEMENT: &str = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,2 +1,2 @@
+-a
+-b
++A
++B
+";
+
+    #[test]
+    fn slice_changed_separates_deletions() {
+        // Select both deletions (changed lines 1,2): a pure deletion piece.
+        let h = hunk(REPLACEMENT);
+        let p = slice_changed_lines(&h, &sel(&[1, 2])).unwrap();
+        assert_eq!(p.old_lines, 2);
+        assert_eq!(p.new_lines, 0);
+        assert!(p.lines.iter().all(|l| l.kind == LineKind::Del));
+    }
+
+    #[test]
+    fn slice_changed_separates_additions() {
+        // Select both additions (changed lines 3,4): the deletions become context so the piece
+        // keeps an anchor; it is not a zero-context hunk.
+        let h = hunk(REPLACEMENT);
+        let p = slice_changed_lines(&h, &sel(&[3, 4])).unwrap();
+        assert_eq!(p.old_lines, 2); // two context lines (the retained deletions)
+        assert_eq!(p.new_lines, 4); // two context + two additions
+        assert_eq!(
+            p.lines.iter().filter(|l| l.kind == LineKind::Del).count(),
+            0
+        );
+        assert_eq!(
+            p.lines
+                .iter()
+                .filter(|l| l.kind == LineKind::Context)
+                .count(),
+            2
+        );
+        assert_eq!(
+            p.lines.iter().filter(|l| l.kind == LineKind::Add).count(),
+            2
+        );
+    }
+
+    #[test]
+    fn slice_changed_del_and_add_pieces_apply_independently_via_git() {
+        // The key agent operation: stage a replacement's removals separately from its insertions.
+        // Both pieces must apply to the original file on their own.
+        let h = hunk(REPLACEMENT);
+        let dels = slice_changed_lines(&h, &sel(&[1, 2])).unwrap();
+        let adds = slice_changed_lines(&h, &sel(&[3, 4])).unwrap();
+        assert!(git_apply_ok(&[dels], "a\nb\n"), "deletion piece must apply");
+        assert!(git_apply_ok(&[adds], "a\nb\n"), "addition piece must apply");
+    }
+
+    const ADD_SPLIT_BY_DEL: &str = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,1 +1,2 @@
++x
+-y
++z
+";
+
+    #[test]
+    fn slice_changed_addresses_deletion_split_by_additions() {
+        // `+x -y +z`: the deletion (changed line 2) is surrounded by additions, so `@lo-hi`
+        // cannot isolate it. `slice_changed_lines` can: select just the deletion.
+        let h = hunk(ADD_SPLIT_BY_DEL);
+        let p = slice_changed_lines(&h, &sel(&[2])).unwrap();
+        assert_eq!(p.old_lines, 1);
+        assert_eq!(p.new_lines, 0);
+        assert_eq!(p.lines.len(), 1);
+        assert_eq!(p.lines[0].kind, LineKind::Del);
+        assert_eq!(p.lines[0].text, b"y");
+        assert!(git_apply_ok(&[p], "y\n"), "isolated deletion must apply");
+    }
+
+    #[test]
+    fn slice_changed_selecting_additions_around_deletion_keeps_it_as_context() {
+        // Select the two additions of `+x -y +z`; the deletion becomes context and anchors it.
+        let h = hunk(ADD_SPLIT_BY_DEL);
+        let p = slice_changed_lines(&h, &sel(&[1, 3])).unwrap();
+        assert_eq!(p.old_lines, 1); // the retained deletion, now context
+        assert_eq!(p.new_lines, 3); // context + two additions
+        assert!(git_apply_ok(&[p], "y\n"), "addition piece must apply");
+    }
+
+    #[test]
+    fn slice_changed_roundtrip_full_selection_reproduces_body() {
+        // Selecting every changed line reproduces the original sub-hunk body.
+        let h = hunk(REPLACEMENT);
+        let all = slice_changed_lines(&h, &sel(&[1, 2, 3, 4])).unwrap();
+        assert_eq!(all.lines, h.lines);
+    }
+
+    #[test]
+    fn slice_changed_readds_no_newline_line_when_additions_follow() {
+        // Old file `a` has no trailing newline; it is replaced by `b\nc\n`. Selecting only the
+        // additions retains `-a` (no_newline). Because content now follows it, `a` must gain a
+        // trailing newline, so the piece deletes the no-newline `a` and re-adds it with a newline
+        // (git's representation) rather than emitting a malformed mid-hunk no-newline context.
+        let h = hunk(
+            "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1 +1,2 @@
+-a
+\\ No newline at end of file
++b
++c
+",
+        );
+        // Changed lines: 1=`-a`(no_newline), 2=`+b`, 3=`+c`. Select the two additions.
+        let p = slice_changed_lines(&h, &sel(&[2, 3])).unwrap();
+        assert_eq!(p.lines[0].kind, LineKind::Del);
+        assert_eq!(p.lines[0].text, b"a");
+        assert!(
+            p.lines[0].no_newline,
+            "the deleted `a` keeps the no-newline flag"
+        );
+        assert_eq!(p.lines[1].kind, LineKind::Add);
+        assert_eq!(p.lines[1].text, b"a");
+        assert!(
+            !p.lines[1].no_newline,
+            "the re-added `a` gains a trailing newline"
+        );
+        // old side: one deletion; new side: re-added a + b + c.
+        assert_eq!(p.old_lines, 1);
+        assert_eq!(p.new_lines, 3);
+        assert!(
+            git_apply_ok(&[p], "a"),
+            "addition piece must apply to `a` (no trailing newline)"
+        );
+    }
+
+    #[test]
+    fn slice_changed_out_of_range_and_empty_error() {
+        let h = hunk(REPLACEMENT); // 4 changed lines
+        assert!(matches!(
+            slice_changed_lines(&h, &sel(&[5])),
+            Err(SplitError::ChangedLineOutOfRange {
+                index: 5,
+                changed: 4
+            })
+        ));
+        assert_eq!(
+            slice_changed_lines(&h, &sel(&[])),
+            Err(SplitError::NoChangedLinesSelected)
         );
     }
 }

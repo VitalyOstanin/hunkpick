@@ -1,7 +1,9 @@
 use crate::model::*;
 use crate::split::auto_split_hunk;
 use crate::split::slice_added_range;
+use crate::split::slice_changed_lines;
 use crate::subhunk_id::subhunk_hash;
+use std::collections::BTreeSet;
 use std::fmt;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -36,6 +38,13 @@ pub enum IndexSet {
         index: usize,
         lines: LineRange,
     },
+    /// `INDEX@L<set>`: one sub-hunk cut to an arbitrary subset of its changed (`+`/`-`) lines,
+    /// numbered `1..=changed` in body order. Unlike `Ranged`, any subset is realisable (a
+    /// deletion split by additions, a replacement's removals separated from its insertions).
+    LineSet {
+        index: usize,
+        lines: Vec<usize>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -53,6 +62,10 @@ pub enum SelectError {
     /// An `INDEX@lo-hi` range could not be applied to the addressed sub-hunk (carries the
     /// underlying reason from `split::slice_added_range`).
     Range(String),
+    /// An `INDEX@L<set>` line-set selector could not be applied (an out-of-range changed line,
+    /// or the sub-hunk combined with another selection). Kept distinct from `Range` so the
+    /// message names the `@L` form rather than a range, helping a consumer self-correct.
+    LineSelect(String),
 }
 
 impl fmt::Display for SelectError {
@@ -69,6 +82,7 @@ impl fmt::Display for SelectError {
             ),
             SelectError::EmptySelection => write!(f, "selection is empty"),
             SelectError::Range(m) => write!(f, "range selector: {m}"),
+            SelectError::LineSelect(m) => write!(f, "line selector: {m}"),
         }
     }
 }
@@ -175,12 +189,18 @@ fn parse_index_set(s: &str) -> Result<IndexSet, SetParseError> {
     if s == "*" {
         return Ok(IndexSet::All);
     }
-    // `INDEX@RANGE`: a numeric index, then '@', then the added-line range. Checked before the
+    // `INDEX@RANGE`: a numeric index, then '@', then the range/set. Checked before the
     // index-list form so the '@' is not mistaken for a malformed list entry. Only a numeric
     // index may precede '@' — `@id` (content id) is a different form handled in parse_selectors
     // (it starts with '@', so it never reaches here as `INDEX@...`).
     if let Some((idx, range)) = s.split_once('@') {
         let index = parse_pos(idx)?;
+        // `L<set>` addresses individual changed (+/-) lines (a comma-separated index list over
+        // `1..=changed`); a plain `lo-hi` is the added-line range.
+        if let Some(set) = range.strip_prefix('L') {
+            let lines = parse_index_list(set)?;
+            return Ok(IndexSet::LineSet { index, lines });
+        }
         let lines = parse_line_range(range)?;
         return Ok(IndexSet::Ranged { index, lines });
     }
@@ -261,6 +281,11 @@ fn parse_index_list(s: &str) -> Result<Vec<usize>, SetParseError> {
             }
             v.extend(lo..=hi);
         } else {
+            // Cap single indices too, so a list of many bare indices (`1,1,1,...`) has the same
+            // allocation ceiling as a range.
+            if v.len() + 1 > MAX_SELECTOR_INDICES {
+                return Err(SetParseError::TooLarge);
+            }
             v.push(parse_pos(part)?);
         }
     }
@@ -290,12 +315,23 @@ pub(crate) fn all_same_content(items: &[(&FileDiff, &Hunk)]) -> bool {
     })
 }
 
-/// One resolved selection within a file: a whole sub-hunk, or a sub-hunk cut to a (already
-/// resolved, 1-based, inclusive) added-line range.
-#[derive(Clone, Copy)]
+/// One resolved selection within a file: a whole sub-hunk, a sub-hunk cut to a (already
+/// resolved, 1-based, inclusive) added-line range, or a sub-hunk cut to an arbitrary set of its
+/// changed lines.
+#[derive(Clone)]
 enum Chosen {
     Whole(usize),
-    Ranged { index: usize, lo: usize, hi: usize },
+    Ranged {
+        index: usize,
+        lo: usize,
+        hi: usize,
+    },
+    /// A subset of one sub-hunk's changed (`+`/`-`) lines, 1-based over `1..=changed` in body
+    /// order. Sorted and deduplicated. Addressed by `INDEX@L<set>`.
+    Lines {
+        index: usize,
+        lines: Vec<usize>,
+    },
 }
 
 impl Chosen {
@@ -303,6 +339,7 @@ impl Chosen {
         match self {
             Chosen::Whole(i) => *i,
             Chosen::Ranged { index, .. } => *index,
+            Chosen::Lines { index, .. } => *index,
         }
     }
 }
@@ -391,6 +428,22 @@ fn resolve_selectors(
                             hi,
                         });
                     }
+                    IndexSet::LineSet { index, lines } => {
+                        if *index > subs.len() {
+                            return Err(SelectError::NoIndex(format!(
+                                "{}:{index}",
+                                display_name(patch, fi, path)
+                            )));
+                        }
+                        // The concrete range check (against the sub-hunk's changed-line count)
+                        // and normalisation (sort + dedup, via a `BTreeSet`) happen at emission in
+                        // `slice_changed_lines`, mirroring how `Ranged` defers to
+                        // `slice_added_range`; no need to canonicalise the raw indices here.
+                        chosen.entry(fi).or_default().push(Chosen::Lines {
+                            index: *index,
+                            lines: lines.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -414,12 +467,32 @@ fn emit_selection(
             FileContent::Binary(b) => FileContent::Binary(b.clone()),
             FileContent::Text(_) => {
                 let subs = &subs_cache[&fi];
+                // A sub-hunk addressed by `@L` (a changed-line subset) must be its ONLY selection.
+                // Partial `@L` pieces of one sub-hunk emitted together would carry mutually
+                // inconsistent new-side line numbers, and combining `@L` with a whole/range pick
+                // of the same sub-hunk double-counts its lines. Reject as a usage error before
+                // emission; the diff -> stage -> re-diff loop is the way to combine such pieces.
+                for p in &picks {
+                    if let Chosen::Lines { index, .. } = p {
+                        if picks.iter().filter(|q| q.index() == *index).count() > 1 {
+                            return Err(SelectError::LineSelect(format!(
+                                "sub-hunk {index} is addressed by @L together with another \
+                                 selection of the same sub-hunk; address it once, or stage the \
+                                 pieces in separate rounds"
+                            )));
+                        }
+                    }
+                }
                 // The 1-based added-line span a pick covers within its sub-hunk: a whole
                 // sub-hunk covers all of its added lines, a range covers `lo..=hi`.
                 let span = |c: &Chosen| -> (usize, usize) {
                     match c {
                         Chosen::Whole(i) => (1, subs[i - 1].change_counts().0 as usize),
                         Chosen::Ranged { lo, hi, .. } => (*lo, *hi),
+                        // An `@L` pick is exclusive per sub-hunk (checked above), so its span is
+                        // never compared against a same-index neighbour; a placeholder keeps the
+                        // sort order total.
+                        Chosen::Lines { .. } => (0, 0),
                     }
                 };
                 // Order by sub-hunk index (emitted hunks in old-file order), then by the first
@@ -445,11 +518,17 @@ fn emit_selection(
                 }
                 let mut hunks = Vec::with_capacity(picks.len());
                 for pick in &picks {
-                    match *pick {
+                    match pick {
                         Chosen::Whole(i) => hunks.push(subs[i - 1].clone()),
                         Chosen::Ranged { index, lo, hi } => {
-                            let cut = slice_added_range(&subs[index - 1], lo, hi)
+                            let cut = slice_added_range(&subs[index - 1], *lo, *hi)
                                 .map_err(|e| SelectError::Range(e.to_string()))?;
+                            hunks.push(cut);
+                        }
+                        Chosen::Lines { index, lines } => {
+                            let set: BTreeSet<usize> = lines.iter().copied().collect();
+                            let cut = slice_changed_lines(&subs[index - 1], &set)
+                                .map_err(|e| SelectError::LineSelect(e.to_string()))?;
                             hunks.push(cut);
                         }
                     }
@@ -1140,5 +1219,150 @@ new file mode 100644
             "second-only sub-hunk failed to apply:\n{}",
             String::from_utf8_lossy(&diff)
         );
+    }
+
+    /// A single-file replacement diff: file `a,b` -> `A,B` as one contiguous run.
+    /// Changed lines: 1=`-a`, 2=`-b`, 3=`+A`, 4=`+B`.
+    const REPL_FILE: &str = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,2 +1,2 @@
+-a
+-b
++A
++B
+";
+
+    /// True if `diff_bytes` applies to a file `f` seeded with `content` in a fresh git repo.
+    fn apply_ok(diff_bytes: &[u8], content: &str) -> bool {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f"), content).unwrap();
+        Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        let mut child = Command::new("git")
+            .arg("apply")
+            .arg("--check")
+            .current_dir(&dir)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(diff_bytes).unwrap();
+        child.wait().unwrap().success()
+    }
+
+    #[test]
+    fn parse_line_set_selector() {
+        let sels = parse_selectors(&["1@L1,3".to_string()]).unwrap();
+        assert_eq!(
+            sels[0],
+            Selector::File {
+                path: None,
+                indices: IndexSet::LineSet {
+                    index: 1,
+                    lines: vec![1, 3],
+                },
+            }
+        );
+        // Ranges inside the set expand like an index list.
+        let sels = parse_selectors(&["2@L1-2,4".to_string()]).unwrap();
+        assert_eq!(
+            sels[0],
+            Selector::File {
+                path: None,
+                indices: IndexSet::LineSet {
+                    index: 2,
+                    lines: vec![1, 2, 4],
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_line_set_with_path() {
+        let sels = parse_selectors(&["src/f:2@L1".to_string()]).unwrap();
+        assert_eq!(
+            sels[0],
+            Selector::File {
+                path: Some("src/f".to_string()),
+                indices: IndexSet::LineSet {
+                    index: 2,
+                    lines: vec![1],
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_line_set_rejects_malformed() {
+        // Empty set, zero index bound, reversed range inside the set.
+        assert!(parse_selectors(&["1@L".to_string()]).is_err());
+        assert!(parse_selectors(&["1@L0".to_string()]).is_err());
+        assert!(parse_selectors(&["1@L3-1".to_string()]).is_err());
+    }
+
+    #[test]
+    fn select_line_set_separates_deletions_from_additions() {
+        // The key agent operation: two invocations, each applying to the original file, stage the
+        // removals and the insertions of a replacement independently.
+        let p = parse(REPL_FILE.as_bytes()).unwrap();
+
+        let dels = select(&p, &parse_selectors(&["1@L1,2".to_string()]).unwrap()).unwrap();
+        let dels_text = String::from_utf8(emit(&dels)).unwrap();
+        assert!(dels_text.contains("-a") && dels_text.contains("-b"));
+        assert!(!dels_text.contains("+A") && !dels_text.contains("+B"));
+        assert!(
+            apply_ok(&emit(&dels), "a\nb\n"),
+            "deletion piece must apply"
+        );
+
+        let adds = select(&p, &parse_selectors(&["1@L3,4".to_string()]).unwrap()).unwrap();
+        let adds_text = String::from_utf8(emit(&adds)).unwrap();
+        assert!(adds_text.contains("+A") && adds_text.contains("+B"));
+        assert!(
+            !adds_text.contains("-a"),
+            "deletions must be context, not `-`"
+        );
+        assert!(
+            apply_ok(&emit(&adds), "a\nb\n"),
+            "addition piece must apply"
+        );
+    }
+
+    #[test]
+    fn select_line_set_out_of_range_errors() {
+        let p = parse(REPL_FILE.as_bytes()).unwrap(); // 4 changed lines
+        let sels = parse_selectors(&["1@L5".to_string()]).unwrap();
+        assert!(matches!(select(&p, &sels), Err(SelectError::LineSelect(_))));
+    }
+
+    #[test]
+    fn select_line_set_unknown_index_errors() {
+        let p = parse(REPL_FILE.as_bytes()).unwrap();
+        let sels = parse_selectors(&["9@L1".to_string()]).unwrap();
+        assert!(matches!(select(&p, &sels), Err(SelectError::NoIndex(_))));
+    }
+
+    #[test]
+    fn select_line_set_combined_with_whole_same_subhunk_rejected() {
+        // `@L` of a sub-hunk plus the whole sub-hunk double-counts its lines: usage error.
+        let p = parse(REPL_FILE.as_bytes()).unwrap();
+        let sels = parse_selectors(&["1".to_string(), "1@L1".to_string()]).unwrap();
+        assert!(matches!(select(&p, &sels), Err(SelectError::LineSelect(_))));
+    }
+
+    #[test]
+    fn select_two_line_sets_of_same_subhunk_rejected() {
+        // Two `@L` selections of the same sub-hunk in one invocation would emit mutually
+        // inconsistent pieces: usage error, use the re-diff loop instead.
+        let p = parse(REPL_FILE.as_bytes()).unwrap();
+        let sels = parse_selectors(&["1@L1,2".to_string(), "1@L3,4".to_string()]).unwrap();
+        assert!(matches!(select(&p, &sels), Err(SelectError::LineSelect(_))));
     }
 }

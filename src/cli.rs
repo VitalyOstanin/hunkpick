@@ -31,6 +31,13 @@ Examples:
   git diff src/lib.rs | hunkpick select 1@1-90 | git apply --cached
   git diff src/lib.rs | hunkpick select 1@91-  | git apply --cached
 
+  # Split a sub-hunk by individual changed lines (@L numbers the +/- lines 1..N,
+  # see `list --json` changed_lines). Separate a replacement's removals from its
+  # insertions: stage the deletions, commit, then re-diff and stage the rest. The
+  # re-diff renumbers the remaining lines, so 1@L1,2 then selects the additions.
+  git diff src/lib.rs | hunkpick select 1@L1,2 | git apply --cached && git commit -m 'remove ...'
+  git diff src/lib.rs | hunkpick select 1@L1,2 | git apply --cached && git commit -m 'add ...'
+
 Content ids (@<id>):
   Every sub-hunk in `list` output carries a stable 16-hex content id, also
   accepted by `select` as @<id>. The id hashes only the file path and the
@@ -124,8 +131,9 @@ pub enum Command {
     /// Each hunk is auto-split into minimal sub-hunks (one contiguous change run each). For
     /// every sub-hunk `list` shows a 1-based per-file index and a 16-hex content id; either
     /// can be passed to `select` (the id as `@<id>`). `--json` emits the same data as a
-    /// stable machine schema, plus `id_count` (how many sub-hunks share an id; 1 = unique).
-    /// Binary files are listed with no sub-hunks.
+    /// stable machine schema, plus `id_count` (how many sub-hunks share an id; 1 = unique)
+    /// and `changed_lines` (each sub-hunk's +/- lines, 1-based in body order, for addressing
+    /// with `select INDEX@L<set>`). Binary files are listed with no sub-hunks.
     List {
         /// Emit machine-readable JSON instead of the human listing.
         #[arg(long)]
@@ -148,6 +156,8 @@ pub enum Command {
         ///   @ID             every sub-hunk whose 16-hex content id is ID (from `list`)
         ///   path:N@lo-hi    cut sub-hunk N of a file to its added lines lo..hi
         ///   N@lo-hi         the same in a single-file diff (also N@lo-, N@-hi, N@N)
+        ///   path:N@L<set>   cut sub-hunk N to a subset of its changed (+/-) lines
+        ///   N@L<set>        the same in a single-file diff (set: e.g. L1,3 or L1-2,4)
         ///
         /// Indices and ids come from `list`. A content id is derived from the file path and
         /// the sub-hunk's changed (+/-) lines only, ignoring context and the @@ line numbers:
@@ -164,6 +174,17 @@ pub enum Command {
         /// and the cut is allowed only between two added lines. Only a numeric index may
         /// precede '@' (not @id, not *). Use it to split an otherwise atomic addition-only
         /// sub-hunk (a new-function block or a file-creation diff) across commits.
+        ///
+        /// INDEX@L<set> cuts a sub-hunk to an arbitrary subset of its changed (+/-) lines.
+        /// The set numbers the sub-hunk's changed lines 1..N in body order (deletions and
+        /// additions share one numbering, as shown by `list --json`'s changed_lines), e.g.
+        /// L1,3 or L1-2,4. Unlike @lo-hi it has no boundary restriction: it can isolate a
+        /// deletion surrounded by additions, or separate a replacement's removals from its
+        /// insertions (select the deletions in one round, the additions in the next). A
+        /// sub-hunk addressed by @L must be addressed once per invocation (do not combine it
+        /// with another selection of the same sub-hunk); stage further pieces in later rounds.
+        /// Note the two @-forms number differently: @lo-hi counts only added (+) lines, @L
+        /// counts all changed (+/-) lines, so the changed_lines indices are for @L only.
         #[arg(verbatim_doc_comment)]
         selectors: Vec<String>,
         #[command(flatten)]

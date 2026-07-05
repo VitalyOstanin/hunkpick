@@ -4,6 +4,17 @@ use serde::Serialize;
 use std::fmt::Write as _;
 
 #[derive(Serialize)]
+struct JsonChangedLine {
+    /// 1-based index over the sub-hunk's changed (`+`/`-`) lines in body order. Pass a set of
+    /// these to `select INDEX@L<set>` to stage an arbitrary subset of the sub-hunk's changes.
+    i: usize,
+    /// `"add"` for an inserted line, `"del"` for a removed one.
+    kind: &'static str,
+    /// The line text (without the leading marker), decoded lossily for display.
+    text: String,
+}
+
+#[derive(Serialize)]
 struct JsonHunk {
     index: usize,
     /// Stable content id; pass as `@<id>` to `select`. See [`crate::subhunk_id`].
@@ -21,8 +32,30 @@ struct JsonHunk {
     /// True when the sub-hunk is all additions and can be cut at any added line via
     /// `select INDEX@lo-hi`.
     addition_only: bool,
+    /// The sub-hunk's changed (`+`/`-`) lines, in body order, each with its 1-based index for
+    /// `select INDEX@L<set>`. Additions and deletions share one numbering. Empty for a binary
+    /// or all-context sub-hunk.
+    changed_lines: Vec<JsonChangedLine>,
     header: String,
     preview: String,
+}
+
+/// The sub-hunk's changed (`+`/`-`) lines as JSON entries, 1-based in body order.
+fn changed_lines(h: &Hunk) -> Vec<JsonChangedLine> {
+    h.lines
+        .iter()
+        .filter(|l| !matches!(l.kind, LineKind::Context))
+        .enumerate()
+        .map(|(idx, l)| JsonChangedLine {
+            i: idx + 1,
+            kind: match l.kind {
+                LineKind::Add => "add",
+                LineKind::Del => "del",
+                LineKind::Context => unreachable!("context lines are filtered out"),
+            },
+            text: String::from_utf8_lossy(&l.text).into_owned(),
+        })
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -93,6 +126,7 @@ pub fn list_json(patch: &Patch) -> String {
                     added,
                     deleted,
                     addition_only: addition_only(h),
+                    changed_lines: changed_lines(h),
                     header: header_string(h),
                     preview: preview(h),
                 }
@@ -298,6 +332,51 @@ new file mode 100644
             !out.contains("[+range]"),
             "addition-only marker must not appear for a mixed sub-hunk:\n{out}"
         );
+    }
+
+    #[test]
+    fn json_lists_changed_lines_with_indices() {
+        // The first sub-hunk of MULTI is the b->B change: one deletion, one addition, numbered
+        // 1 and 2 in body order (deletion first).
+        let p = parse(MULTI.as_bytes()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
+        let cl = &v[0]["hunks"][0]["changed_lines"];
+        assert_eq!(cl.as_array().unwrap().len(), 2);
+        assert_eq!(cl[0]["i"], 1);
+        assert_eq!(cl[0]["kind"], "del");
+        assert_eq!(cl[0]["text"], "b");
+        assert_eq!(cl[1]["i"], 2);
+        assert_eq!(cl[1]["kind"], "add");
+        assert_eq!(cl[1]["text"], "B");
+    }
+
+    #[test]
+    fn json_changed_lines_number_across_dels_and_adds() {
+        // A replacement `-a -b +A +B`: four changed lines numbered 1..4 (both deletions, then
+        // both additions), matching the `select INDEX@L<set>` numbering.
+        let p = parse(
+            "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,2 +1,2 @@
+-a
+-b
++A
++B
+"
+            .as_bytes(),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
+        let cl = v[0]["hunks"][0]["changed_lines"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let kinds: Vec<&str> = cl.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, vec!["del", "del", "add", "add"]);
+        let idx: Vec<u64> = cl.iter().map(|e| e["i"].as_u64().unwrap()).collect();
+        assert_eq!(idx, vec![1, 2, 3, 4]);
     }
 
     #[test]
