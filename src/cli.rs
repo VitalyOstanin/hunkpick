@@ -26,15 +26,16 @@ Examples:
   # Split original hunk 1 at new-file line 5 (cut point must be a context line)
   git diff src/lib.rs | hunkpick split 1 --at 5
 
-  # Split an addition-only block (e.g. a new-function block) across commits.
-  # RANGE numbers the sub-hunk's added (+) lines; only an index may precede '@'.
-  git diff src/lib.rs | hunkpick select 1@1-90 | git apply --cached
-  git diff src/lib.rs | hunkpick select 1@91-  | git apply --cached
-
   # Split a sub-hunk by individual changed lines (@L numbers the +/- lines 1..N,
-  # see `list --json` changed_lines). Separate a replacement's removals from its
-  # insertions: stage the deletions, commit, then re-diff and stage the rest. The
-  # re-diff renumbers the remaining lines, so 1@L1,2 then selects the additions.
+  # see `list --json` changed_lines). @L keeps both leading and trailing context
+  # so every subset applies. Split an addition-only block (a new-function block)
+  # across commits, one piece per round:
+  git diff src/lib.rs | hunkpick select 1@L1-90 | git apply --cached
+  git diff src/lib.rs | hunkpick select 1@L91-120 | git apply --cached
+
+  # Separate a replacement's removals from its insertions: stage the deletions,
+  # commit, then re-diff and stage the rest. The re-diff renumbers the remaining
+  # lines, so 1@L1,2 then selects the additions.
   git diff src/lib.rs | hunkpick select 1@L1,2 | git apply --cached && git commit -m 'remove ...'
   git diff src/lib.rs | hunkpick select 1@L1,2 | git apply --cached && git commit -m 'add ...'
 
@@ -131,10 +132,9 @@ pub enum Command {
     /// Each hunk is auto-split into minimal sub-hunks (one contiguous change run each). For
     /// every sub-hunk `list` shows a 1-based per-file index and a 16-hex content id; either
     /// can be passed to `select` (the id as `@<id>`). A sub-hunk that is all additions (a
-    /// file-creation or pure-append block with no context, so it is freely cuttable at any
-    /// added line with `@lo-hi`) is flagged with a `[+range]` marker in the human listing.
-    /// `--json` emits the same data as a stable machine schema, plus `id_count` (how many
-    /// sub-hunks share an id; 1 = unique), `addition_only` (that same all-additions flag),
+    /// file-creation or pure-append block) is flagged with a `[+add]` marker in the human
+    /// listing. `--json` emits the same data as a stable machine schema, plus `id_count` (how
+    /// many sub-hunks share an id; 1 = unique), `addition_only` (that same all-additions flag),
     /// and `changed_lines` (each sub-hunk's +/- lines, 1-based in body order, for addressing
     /// with `select INDEX@L<set>`). Binary files are listed with no sub-hunks.
     List {
@@ -157,9 +157,7 @@ pub enum Command {
         ///   path:N,M        the same, within the named file
         ///   path:* | *      every sub-hunk (of `path`, or of a single-file diff)
         ///   @ID             every sub-hunk whose 16-hex content id is ID (from `list`)
-        ///   path:N@lo-hi    cut sub-hunk N of a file to its added lines lo..hi
-        ///   N@lo-hi         the same in a single-file diff (also N@lo-, N@-hi, N@N)
-        ///   path:N@L<set>   cut sub-hunk N to a subset of its changed (+/-) lines
+        ///   path:N@L<set>   cut sub-hunk N of a file to a subset of its changed (+/-) lines
         ///   N@L<set>        the same in a single-file diff (set: e.g. L1,3 or L1-2,4)
         ///
         /// Indices and ids come from `list`. A content id is derived from the file path and
@@ -172,22 +170,17 @@ pub enum Command {
         /// just one. Precedence: path:set first (a file named `@foo` stays addressable as
         /// `@foo:1`), then @ID, then a bare set.
         ///
-        /// INDEX@RANGE cuts one addition block into pieces: RANGE numbers the sub-hunk's
-        /// added (+) lines (1-based; lo- = to the end, -hi = from the start, N = one line),
-        /// and the cut is allowed only between two added lines. Only a numeric index may
-        /// precede '@' (not @id, not *). Use it to split an otherwise atomic addition-only
-        /// sub-hunk (a new-function block or a file-creation diff) across commits.
-        ///
         /// INDEX@L<set> cuts a sub-hunk to an arbitrary subset of its changed (+/-) lines.
-        /// The set numbers the sub-hunk's changed lines 1..N in body order (deletions and
-        /// additions share one numbering, as shown by `list --json`'s changed_lines), e.g.
-        /// L1,3 or L1-2,4. Unlike @lo-hi it has no boundary restriction: it can isolate a
-        /// deletion surrounded by additions, or separate a replacement's removals from its
-        /// insertions (select the deletions in one round, the additions in the next). A
-        /// sub-hunk addressed by @L must be addressed once per invocation (do not combine it
-        /// with another selection of the same sub-hunk); stage further pieces in later rounds.
-        /// Note the two @-forms number differently: @lo-hi counts only added (+) lines, @L
-        /// counts all changed (+/-) lines, so the changed_lines indices are for @L only.
+        /// Only a numeric index may precede '@' (not @id, not *). The set numbers the sub-hunk's
+        /// changed lines 1..N in body order (deletions and additions share one numbering, as
+        /// shown by `list --json`'s changed_lines), e.g. L1,3 or L1-2,4. It has no boundary
+        /// restriction and keeps both leading and trailing context, so every subset applies
+        /// under `git apply`: it can split an addition-only block (a new-function block or a
+        /// file-creation diff) across commits, isolate a deletion surrounded by additions, or
+        /// separate a replacement's removals from its insertions (select the deletions in one
+        /// round, the additions in the next). A sub-hunk addressed by @L must be addressed once
+        /// per invocation (do not combine it with another selection of the same sub-hunk); stage
+        /// further pieces in later rounds.
         #[arg(verbatim_doc_comment)]
         selectors: Vec<String>,
         #[command(flatten)]
@@ -313,12 +306,12 @@ mod tests {
     }
 
     #[test]
-    fn long_help_documents_range_form() {
+    fn long_help_documents_lineset_form() {
         let mut cmd = Cli::command();
         let help = cmd.render_long_help().to_string();
         assert!(
-            help.contains("1@1-90"),
-            "long help must show a range example"
+            help.contains("1@L1-90"),
+            "long help must show an @L changed-line example"
         );
     }
 }

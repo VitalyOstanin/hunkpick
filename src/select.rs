@@ -1,6 +1,5 @@
 use crate::model::*;
 use crate::split::auto_split_hunk;
-use crate::split::slice_added_range;
 use crate::split::slice_changed_lines;
 use crate::subhunk_id::subhunk_hash;
 use std::collections::BTreeSet;
@@ -17,30 +16,15 @@ pub enum Selector {
     Id(String),
 }
 
-/// An inclusive added-line range within one sub-hunk. `None` is an open end: `lo == None`
-/// means "from the first added line", `hi == None` means "to the last added line". The
-/// concrete bounds are resolved in `select` against the sub-hunk's added-line count.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub struct LineRange {
-    pub lo: Option<usize>,
-    pub hi: Option<usize>,
-}
-
 /// The index part of a `File` selector: either an explicit list of 1-based indices or `*`,
 /// meaning every sub-hunk of the addressed file.
 #[derive(Debug, PartialEq, Eq)]
 pub enum IndexSet {
     All,
     List(Vec<usize>),
-    /// `INDEX@RANGE`: one sub-hunk cut to an added-line range. Only a numeric index may
-    /// precede `@` (no content-id, no `*`).
-    Ranged {
-        index: usize,
-        lines: LineRange,
-    },
     /// `INDEX@L<set>`: one sub-hunk cut to an arbitrary subset of its changed (`+`/`-`) lines,
-    /// numbered `1..=changed` in body order. Unlike `Ranged`, any subset is realisable (a
-    /// deletion split by additions, a replacement's removals separated from its insertions).
+    /// numbered `1..=changed` in body order. Any subset is realisable (a deletion split by
+    /// additions, a replacement's removals separated from its insertions).
     LineSet {
         index: usize,
         lines: Vec<usize>,
@@ -59,12 +43,11 @@ pub enum SelectError {
     /// collision between distinct changes). Carries the colliding id.
     IdCollision(String),
     EmptySelection,
-    /// An `INDEX@lo-hi` range could not be applied to the addressed sub-hunk (carries the
-    /// underlying reason from `split::slice_added_range`).
-    Range(String),
+    /// A selector used the removed `INDEX@lo-hi` added-line range form. Carries the offending
+    /// selector so the message can point the caller at the `@L` replacement.
+    RemovedRangeForm(String),
     /// An `INDEX@L<set>` line-set selector could not be applied (an out-of-range changed line,
-    /// or the sub-hunk combined with another selection). Kept distinct from `Range` so the
-    /// message names the `@L` form rather than a range, helping a consumer self-correct.
+    /// or the sub-hunk combined with another selection).
     LineSelect(String),
 }
 
@@ -81,7 +64,11 @@ impl fmt::Display for SelectError {
                 "id {id} collides between distinct sub-hunks; address them by path:N instead"
             ),
             SelectError::EmptySelection => write!(f, "selection is empty"),
-            SelectError::Range(m) => write!(f, "range selector: {m}"),
+            SelectError::RemovedRangeForm(s) => write!(
+                f,
+                "{s}: the @lo-hi added-line range form was removed; use @L<lines> instead \
+                 (changed-line indices, e.g. @L1-3; see 'hunkpick list --json' changed_lines)"
+            ),
             SelectError::LineSelect(m) => write!(f, "line selector: {m}"),
         }
     }
@@ -128,12 +115,21 @@ pub fn parse_selectors(args: &[String]) -> Result<Vec<Selector>, SelectError> {
         //    path containing ':' are not misread as an id or a bare set.
         if let Some((p, l)) = a.rsplit_once(':') {
             if !p.is_empty() {
-                if let Ok(indices) = parse_index_set(l) {
-                    out.push(Selector::File {
-                        path: Some(p.to_string()),
-                        indices,
-                    });
-                    continue;
+                match parse_index_set(l) {
+                    Ok(indices) => {
+                        out.push(Selector::File {
+                            path: Some(p.to_string()),
+                            indices,
+                        });
+                        continue;
+                    }
+                    // The removed `@lo-hi` form is unambiguous — surface it here rather than
+                    // letting the arg fall through to be reported as a generic bad selector.
+                    Err(SetParseError::RemovedRange) => {
+                        return Err(SelectError::RemovedRangeForm(a.clone()));
+                    }
+                    // Any other parse failure only means "not the path:set form"; fall through.
+                    Err(_) => {}
                 }
             }
         }
@@ -148,8 +144,10 @@ pub fn parse_selectors(args: &[String]) -> Result<Vec<Selector>, SelectError> {
         }
         // 3. bare set. A parse failure here is terminal (unlike the path form above), so the
         //    specific reason is surfaced to the user rather than discarded.
-        let indices =
-            parse_index_set(a).map_err(|e| SelectError::BadSelector(format!("{a} ({e})")))?;
+        let indices = parse_index_set(a).map_err(|e| match e {
+            SetParseError::RemovedRange => SelectError::RemovedRangeForm(a.clone()),
+            e => SelectError::BadSelector(format!("{a} ({e})")),
+        })?;
         out.push(Selector::File {
             path: None,
             indices,
@@ -167,8 +165,15 @@ enum SetParseError {
     Empty,
     NotANumber(String),
     ZeroBound,
-    ReversedRange { lo: usize, hi: usize },
+    ReversedRange {
+        lo: usize,
+        hi: usize,
+    },
     TooLarge,
+    /// The `INDEX@lo-hi` added-line range form (anything after `@` that is not an `L<set>`).
+    /// The form was removed; the CLI turns this into a `RemovedRangeForm` selector error that
+    /// steers the caller to `@L`.
+    RemovedRange,
 }
 
 impl fmt::Display for SetParseError {
@@ -179,60 +184,32 @@ impl fmt::Display for SetParseError {
             SetParseError::ZeroBound => write!(f, "indices are 1-based, 0 is not valid"),
             SetParseError::ReversedRange { lo, hi } => write!(f, "reversed range: {lo}-{hi}"),
             SetParseError::TooLarge => write!(f, "range too large"),
+            SetParseError::RemovedRange => write!(f, "the @lo-hi range form was removed; use @L"),
         }
     }
 }
 
-/// Parse the index part of a `File` selector: `*` (all), `INDEX@RANGE` (one sub-hunk cut to
-/// an added-line range), or a comma-separated index list.
+/// Parse the index part of a `File` selector: `*` (all), `INDEX@L<set>` (one sub-hunk cut to a
+/// subset of its changed lines), or a comma-separated index list.
 fn parse_index_set(s: &str) -> Result<IndexSet, SetParseError> {
     if s == "*" {
         return Ok(IndexSet::All);
     }
-    // `INDEX@RANGE`: a numeric index, then '@', then the range/set. Checked before the
+    // `INDEX@L<set>`: a numeric index, then `@L`, then the changed-line set. Checked before the
     // index-list form so the '@' is not mistaken for a malformed list entry. Only a numeric
     // index may precede '@' — `@id` (content id) is a different form handled in parse_selectors
-    // (it starts with '@', so it never reaches here as `INDEX@...`).
-    if let Some((idx, range)) = s.split_once('@') {
+    // (it starts with '@', so it never reaches here as `INDEX@...`). Anything after '@' that is
+    // not an `L<set>` is the removed `@lo-hi` added-line range form, reported distinctly so the
+    // CLI can steer the caller to `@L`.
+    if let Some((idx, rest)) = s.split_once('@') {
         let index = parse_pos(idx)?;
-        // `L<set>` addresses individual changed (+/-) lines (a comma-separated index list over
-        // `1..=changed`); a plain `lo-hi` is the added-line range.
-        if let Some(set) = range.strip_prefix('L') {
-            let lines = parse_index_list(set)?;
-            return Ok(IndexSet::LineSet { index, lines });
-        }
-        let lines = parse_line_range(range)?;
-        return Ok(IndexSet::Ranged { index, lines });
+        let Some(set) = rest.strip_prefix('L') else {
+            return Err(SetParseError::RemovedRange);
+        };
+        let lines = parse_index_list(set)?;
+        return Ok(IndexSet::LineSet { index, lines });
     }
     parse_index_list(s).map(IndexSet::List)
-}
-
-/// Parse an added-line range: `lo-hi`, `lo-`, `-hi`, or a single `N` (== `N-N`). Bounds are
-/// 1-based and non-zero; an open end is `None`. Rejects empty input, a bare `-`, a reversed
-/// range, and non-numeric bounds.
-fn parse_line_range(s: &str) -> Result<LineRange, SetParseError> {
-    if s.is_empty() {
-        return Err(SetParseError::Empty);
-    }
-    if let Some((lo_s, hi_s)) = s.split_once('-') {
-        let lo = parse_opt_pos(lo_s)?;
-        let hi = parse_opt_pos(hi_s)?;
-        if lo.is_none() && hi.is_none() {
-            return Err(SetParseError::Empty); // both ends empty: input is "-" (or "--", etc.)
-        }
-        if let (Some(l), Some(h)) = (lo, hi) {
-            if h < l {
-                return Err(SetParseError::ReversedRange { lo: l, hi: h });
-            }
-        }
-        Ok(LineRange { lo, hi })
-    } else {
-        let n = parse_pos(s)?;
-        Ok(LineRange {
-            lo: Some(n),
-            hi: Some(n),
-        })
-    }
 }
 
 /// Parse a 1-based, non-zero position.
@@ -244,15 +221,6 @@ fn parse_pos(s: &str) -> Result<usize, SetParseError> {
         Err(SetParseError::ZeroBound)
     } else {
         Ok(n)
-    }
-}
-
-/// Parse an optional position: empty string is an open end (`None`).
-fn parse_opt_pos(s: &str) -> Result<Option<usize>, SetParseError> {
-    if s.is_empty() {
-        Ok(None)
-    } else {
-        parse_pos(s).map(Some)
     }
 }
 
@@ -315,17 +283,11 @@ pub(crate) fn all_same_content(items: &[(&FileDiff, &Hunk)]) -> bool {
     })
 }
 
-/// One resolved selection within a file: a whole sub-hunk, a sub-hunk cut to a (already
-/// resolved, 1-based, inclusive) added-line range, or a sub-hunk cut to an arbitrary set of its
-/// changed lines.
+/// One resolved selection within a file: a whole sub-hunk, or a sub-hunk cut to an arbitrary
+/// set of its changed lines.
 #[derive(Clone)]
 enum Chosen {
     Whole(usize),
-    Ranged {
-        index: usize,
-        lo: usize,
-        hi: usize,
-    },
     /// A subset of one sub-hunk's changed (`+`/`-`) lines, 1-based over `1..=changed` in body
     /// order. Sorted and deduplicated. Addressed by `INDEX@L<set>`.
     Lines {
@@ -338,7 +300,6 @@ impl Chosen {
     fn index(&self) -> usize {
         match self {
             Chosen::Whole(i) => *i,
-            Chosen::Ranged { index, .. } => *index,
             Chosen::Lines { index, .. } => *index,
         }
     }
@@ -379,11 +340,11 @@ fn resolve_selectors(
             Selector::Id(id) => resolve_id(patch, id, subs_cache, &mut chosen)?,
             Selector::File { path, indices } => {
                 let fi = resolve_file(patch, path.as_deref())?;
-                // A binary file has no sub-hunks; a non-range selector picks the whole binary
-                // change. A range selector makes no sense for a binary file.
+                // A binary file has no sub-hunks; a non-line-set selector picks the whole binary
+                // change. A line-set selector makes no sense for a binary file.
                 if matches!(patch.files[fi].content, FileContent::Binary(_)) {
-                    if let IndexSet::Ranged { .. } = indices {
-                        return Err(SelectError::Range(format!(
+                    if let IndexSet::LineSet { .. } = indices {
+                        return Err(SelectError::LineSelect(format!(
                             "{} is a binary file",
                             patch.files[fi].display_path()
                         )));
@@ -411,23 +372,6 @@ fn resolve_selectors(
                             chosen.entry(fi).or_default().push(Chosen::Whole(idx));
                         }
                     }
-                    IndexSet::Ranged { index, lines } => {
-                        if *index > subs.len() {
-                            return Err(SelectError::NoIndex(format!(
-                                "{}:{index}",
-                                display_name(patch, fi, path)
-                            )));
-                        }
-                        let (added, _) = subs[*index - 1].change_counts();
-                        let lo = lines.lo.unwrap_or(1);
-                        // An open upper end (`lo-`) resolves to the sub-hunk's last added line.
-                        let hi = lines.hi.unwrap_or(added as usize);
-                        chosen.entry(fi).or_default().push(Chosen::Ranged {
-                            index: *index,
-                            lo,
-                            hi,
-                        });
-                    }
                     IndexSet::LineSet { index, lines } => {
                         if *index > subs.len() {
                             return Err(SelectError::NoIndex(format!(
@@ -437,8 +381,7 @@ fn resolve_selectors(
                         }
                         // The concrete range check (against the sub-hunk's changed-line count)
                         // and normalisation (sort + dedup, via a `BTreeSet`) happen at emission in
-                        // `slice_changed_lines`, mirroring how `Ranged` defers to
-                        // `slice_added_range`; no need to canonicalise the raw indices here.
+                        // `slice_changed_lines`; no need to canonicalise the raw indices here.
                         chosen.entry(fi).or_default().push(Chosen::Lines {
                             index: *index,
                             lines: lines.clone(),
@@ -452,8 +395,8 @@ fn resolve_selectors(
 }
 
 /// Emission phase: materialise the resolved selections into a result patch. Per file, order the
-/// picks, drop duplicates, reject overlapping ranges, and cut/clone each sub-hunk. `subs_cache`
-/// must already hold the splits for every referenced file (populated by `resolve_selectors`).
+/// picks, drop duplicates, and cut/clone each sub-hunk. `subs_cache` must already hold the
+/// splits for every referenced file (populated by `resolve_selectors`).
 fn emit_selection(
     patch: &Patch,
     chosen: std::collections::BTreeMap<usize, Vec<Chosen>>,
@@ -469,9 +412,9 @@ fn emit_selection(
                 let subs = &subs_cache[&fi];
                 // A sub-hunk addressed by `@L` (a changed-line subset) must be its ONLY selection.
                 // Partial `@L` pieces of one sub-hunk emitted together would carry mutually
-                // inconsistent new-side line numbers, and combining `@L` with a whole/range pick
-                // of the same sub-hunk double-counts its lines. Reject as a usage error before
-                // emission; the diff -> stage -> re-diff loop is the way to combine such pieces.
+                // inconsistent new-side line numbers, and combining `@L` with a whole pick of the
+                // same sub-hunk double-counts its lines. Reject as a usage error before emission;
+                // the diff -> stage -> re-diff loop is the way to combine such pieces.
                 for p in &picks {
                     if let Chosen::Lines { index, .. } = p {
                         if picks.iter().filter(|q| q.index() == *index).count() > 1 {
@@ -483,48 +426,19 @@ fn emit_selection(
                         }
                     }
                 }
-                // The 1-based added-line span a pick covers within its sub-hunk: a whole
-                // sub-hunk covers all of its added lines, a range covers `lo..=hi`.
-                let span = |c: &Chosen| -> (usize, usize) {
-                    match c {
-                        Chosen::Whole(i) => (1, subs[i - 1].change_counts().0 as usize),
-                        Chosen::Ranged { lo, hi, .. } => (*lo, *hi),
-                        // An `@L` pick is exclusive per sub-hunk (checked above), so its span is
-                        // never compared against a same-index neighbour; a placeholder keeps the
-                        // sort order total.
-                        Chosen::Lines { .. } => (0, 0),
-                    }
-                };
-                // Order by sub-hunk index (emitted hunks in old-file order), then by the first
-                // covered added line so several cuts of one sub-hunk emit ascending. Without the
-                // secondary key, `1@3-4 1@1-2` would emit descending and be rejected as
-                // overlapping even though the ranges are disjoint.
-                picks.sort_by_key(|c| (c.index(), span(c).0));
+                // Order by sub-hunk index so emitted hunks follow old-file order and equal-index
+                // whole picks are adjacent for the dedup below. Distinct sub-hunks are disjoint,
+                // so no overlap check is needed: the only same-index multiplicity is a duplicate
+                // whole (dropped here) or a whole+`@L` collision (rejected above).
+                picks.sort_by_key(|c| c.index());
                 // Drop exact duplicate whole selections (a sub-hunk named twice).
                 picks.dedup_by(
                     |a, b| matches!((a, b), (Chosen::Whole(x), Chosen::Whole(y)) if x == y),
                 );
-                // Reject picks of the same sub-hunk whose added-line spans overlap: emitting them
-                // would duplicate added lines into overlapping, inapplicable hunks. This is a
-                // selector error (exit 2), caught here before emission so it never depends on the
-                // optional internal result-diff check (`--no-verify-result-diff-internal`).
-                for w in picks.windows(2) {
-                    if w[0].index() == w[1].index() && span(&w[1]).0 <= span(&w[0]).1 {
-                        return Err(SelectError::Range(format!(
-                            "sub-hunk {} is addressed by overlapping ranges",
-                            w[0].index()
-                        )));
-                    }
-                }
                 let mut hunks = Vec::with_capacity(picks.len());
                 for pick in &picks {
                     match pick {
                         Chosen::Whole(i) => hunks.push(subs[i - 1].clone()),
-                        Chosen::Ranged { index, lo, hi } => {
-                            let cut = slice_added_range(&subs[index - 1], *lo, *hi)
-                                .map_err(|e| SelectError::Range(e.to_string()))?;
-                            hunks.push(cut);
-                        }
                         Chosen::Lines { index, lines } => {
                             let set: BTreeSet<usize> = lines.iter().copied().collect();
                             let cut = slice_changed_lines(&subs[index - 1], &set)
@@ -974,85 +888,52 @@ diff --git a/f b/f
     }
 
     #[test]
-    fn parse_range_selector_basic() {
-        let sels = parse_selectors(&["1@1-90".to_string()]).unwrap();
+    fn parse_lineset_selector_basic() {
+        let sels = parse_selectors(&["1@L1,3".to_string()]).unwrap();
         assert_eq!(
             sels[0],
             Selector::File {
                 path: None,
-                indices: IndexSet::Ranged {
+                indices: IndexSet::LineSet {
                     index: 1,
-                    lines: LineRange {
-                        lo: Some(1),
-                        hi: Some(90)
-                    },
+                    lines: vec![1, 3],
                 },
             }
         );
     }
 
     #[test]
-    fn parse_range_open_ends_and_single() {
-        let open_hi = parse_selectors(&["1@91-".to_string()]).unwrap();
-        assert_eq!(
-            open_hi[0],
-            Selector::File {
-                path: None,
-                indices: IndexSet::Ranged {
-                    index: 1,
-                    lines: LineRange {
-                        lo: Some(91),
-                        hi: None
-                    }
-                },
-            }
-        );
-        let open_lo = parse_selectors(&["1@-90".to_string()]).unwrap();
-        assert_eq!(
-            open_lo[0],
-            Selector::File {
-                path: None,
-                indices: IndexSet::Ranged {
-                    index: 1,
-                    lines: LineRange {
-                        lo: None,
-                        hi: Some(90)
-                    }
-                },
-            }
-        );
-        let single = parse_selectors(&["2@5".to_string()]).unwrap();
-        assert_eq!(
-            single[0],
-            Selector::File {
-                path: None,
-                indices: IndexSet::Ranged {
-                    index: 2,
-                    lines: LineRange {
-                        lo: Some(5),
-                        hi: Some(5)
-                    }
-                },
-            }
-        );
-    }
-
-    #[test]
-    fn parse_range_selector_with_path() {
-        let sels = parse_selectors(&["src/f:1@1-90".to_string()]).unwrap();
+    fn parse_lineset_with_path_and_range() {
+        let sels = parse_selectors(&["src/f:2@L1-2,4".to_string()]).unwrap();
         assert_eq!(
             sels[0],
             Selector::File {
                 path: Some("src/f".to_string()),
-                indices: IndexSet::Ranged {
-                    index: 1,
-                    lines: LineRange {
-                        lo: Some(1),
-                        hi: Some(90)
-                    }
+                indices: IndexSet::LineSet {
+                    index: 2,
+                    lines: vec![1, 2, 4],
                 },
             }
         );
+    }
+
+    #[test]
+    fn removed_range_form_reports_friendly_error() {
+        // The old `@lo-hi` added-line range form was removed. Any `INDEX@<not L>` selector,
+        // bare or path-qualified, must fail with a message that names the `@L` replacement so a
+        // caller can self-correct — not a bare "bad selector".
+        for sel in ["1@1-3", "1@91-", "1@-90", "2@5", "src/f:1@1-90"] {
+            match parse_selectors(&[sel.to_string()]) {
+                Err(SelectError::RemovedRangeForm(s)) => {
+                    assert_eq!(s, sel);
+                    assert!(
+                        format!("{}", SelectError::RemovedRangeForm(s)).contains("@L"),
+                        "message for {sel} must steer to @L"
+                    );
+                }
+                other => panic!("selector {sel}: expected RemovedRangeForm, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -1060,9 +941,9 @@ diff --git a/f b/f
         // A bare selector that fails to parse must carry *why* it failed, not a bare
         // "bad selector": reversed range, zero bound, non-numeric bound.
         let cases = [
-            ("1@5-2", "reversed range"),
-            ("1@0-5", "1-based"),
-            ("1@a-b", "not a number"),
+            ("2-1", "reversed range"),
+            ("0", "1-based"),
+            ("a", "not a number"),
         ];
         for (sel, needle) in cases {
             match parse_selectors(&[sel.to_string()]) {
@@ -1076,19 +957,14 @@ diff --git a/f b/f
     }
 
     #[test]
-    fn parse_range_rejects_malformed() {
-        // index 0, empty range, reversed range, bare '-', non-numeric, id-form before '@'
-        assert!(parse_selectors(&["0@1-2".to_string()]).is_err());
-        assert!(parse_selectors(&["1@".to_string()]).is_err());
-        assert!(parse_selectors(&["1@5-2".to_string()]).is_err());
-        assert!(parse_selectors(&["1@-".to_string()]).is_err());
-        assert!(parse_selectors(&["1@a-b".to_string()]).is_err());
-        // Zero is not a valid 1-based added-line bound, in either position.
-        assert!(parse_selectors(&["1@0-5".to_string()]).is_err());
-        assert!(parse_selectors(&["1@5-0".to_string()]).is_err());
-        assert!(parse_selectors(&["1@0".to_string()]).is_err());
-        // '@id@range' is NOT supported: only a numeric index may precede '@'.
-        assert!(parse_selectors(&["@deadbeef@1-2".to_string()]).is_err());
+    fn parse_lineset_rejects_malformed() {
+        // empty set, zero index, zero line, id-form before '@'
+        assert!(parse_selectors(&["1@L".to_string()]).is_err());
+        assert!(parse_selectors(&["0@L1".to_string()]).is_err());
+        assert!(parse_selectors(&["1@L0".to_string()]).is_err());
+        assert!(parse_selectors(&["1@L2-1".to_string()]).is_err());
+        // '@id@Lset' is NOT supported: only a numeric index may precede '@'.
+        assert!(parse_selectors(&["@deadbeef@L1-2".to_string()]).is_err());
     }
 
     const PURE_ADD_FILE: &str = "\
@@ -1104,9 +980,9 @@ new file mode 100644
 ";
 
     #[test]
-    fn select_range_first_two_added_lines() {
+    fn select_lineset_first_two_changed_lines() {
         let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
-        let sels = parse_selectors(&["1@1-2".to_string()]).unwrap();
+        let sels = parse_selectors(&["1@L1,2".to_string()]).unwrap();
         let out = select(&p, &sels).unwrap();
         let text = String::from_utf8(emit(&out)).unwrap();
         assert!(text.contains("+l1"));
@@ -1116,77 +992,26 @@ new file mode 100644
     }
 
     #[test]
-    fn select_range_open_end_resolves_to_last() {
+    fn select_lineset_out_of_range_errors() {
         let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
-        let sels = parse_selectors(&["1@3-".to_string()]).unwrap();
-        let out = select(&p, &sels).unwrap();
-        let text = String::from_utf8(emit(&out)).unwrap();
-        assert!(!text.contains("+l2"));
-        assert!(text.contains("+l3"));
-        assert!(text.contains("+l4"));
+        let sels = parse_selectors(&["1@L1-99".to_string()]).unwrap();
+        assert!(matches!(select(&p, &sels), Err(SelectError::LineSelect(_))));
     }
 
     #[test]
-    fn select_range_out_of_range_errors() {
+    fn select_lineset_unknown_index_errors() {
         let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
-        let sels = parse_selectors(&["1@1-99".to_string()]).unwrap();
-        assert!(matches!(select(&p, &sels), Err(SelectError::Range(_))));
-    }
-
-    #[test]
-    fn select_range_unknown_index_errors() {
-        let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
-        let sels = parse_selectors(&["9@1-2".to_string()]).unwrap();
+        let sels = parse_selectors(&["9@L1,2".to_string()]).unwrap();
         assert!(matches!(select(&p, &sels), Err(SelectError::NoIndex(_))));
     }
 
     #[test]
-    fn select_disjoint_ranges_reverse_order_emit_ascending() {
-        // Two disjoint ranges of one sub-hunk given in descending order must be reordered and
-        // emitted ascending, not rejected as overlapping (the order they happen to be typed in
-        // must not change the result).
+    fn select_whole_and_lineset_of_same_subhunk_rejected() {
+        // A whole sub-hunk and an `@L` subset of the same sub-hunk double-count its lines.
+        // Selecting both is contradictory and rejected as a selector error.
         let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
-        let sels = parse_selectors(&["1@3-4".to_string(), "1@1-2".to_string()]).unwrap();
-        let out = select(&p, &sels).unwrap();
-        match &out.files[0].content {
-            FileContent::Text(hunks) => {
-                assert_eq!(hunks.len(), 2);
-                // Emitted in ascending new-file order: l1,l2 piece first, then l3,l4.
-                assert_eq!(hunks[0].new_start, 1);
-                assert_eq!(hunks[1].new_start, 3);
-            }
-            _ => panic!("expected text content"),
-        }
-    }
-
-    #[test]
-    fn select_adjacent_disjoint_ranges_ok() {
-        // The same two disjoint ranges in ascending order also succeed and emit both pieces.
-        let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
-        let sels = parse_selectors(&["1@1-2".to_string(), "1@3-4".to_string()]).unwrap();
-        let out = select(&p, &sels).unwrap();
-        match &out.files[0].content {
-            FileContent::Text(hunks) => assert_eq!(hunks.len(), 2),
-            _ => panic!("expected text content"),
-        }
-    }
-
-    #[test]
-    fn select_overlapping_ranges_rejected() {
-        // `1@1-3` and `1@2-4` share added lines 2-3: emitting both would duplicate them into an
-        // inapplicable diff. This must be a selector error, not a corrupt diff.
-        let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
-        let sels = parse_selectors(&["1@1-3".to_string(), "1@2-4".to_string()]).unwrap();
-        assert!(matches!(select(&p, &sels), Err(SelectError::Range(_))));
-    }
-
-    #[test]
-    fn select_whole_and_range_of_same_subhunk_rejected() {
-        // A whole sub-hunk covers all its added lines, so any range of the same sub-hunk overlaps
-        // it. Selecting both is contradictory and rejected as a selector error.
-        let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
-        let sels = parse_selectors(&["1".to_string(), "1@1-2".to_string()]).unwrap();
-        assert!(matches!(select(&p, &sels), Err(SelectError::Range(_))));
+        let sels = parse_selectors(&["1".to_string(), "1@L1,2".to_string()]).unwrap();
+        assert!(matches!(select(&p, &sels), Err(SelectError::LineSelect(_))));
     }
 
     #[test]

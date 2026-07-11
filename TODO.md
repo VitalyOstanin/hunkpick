@@ -2,7 +2,22 @@
 
 ## Contents
 
+- [Fixed](#fixed)
 - [Per-line cutting: remaining edges](#per-line-cutting-remaining-edges)
+
+## Fixed
+
+### Legacy `@lo-hi` leading slice dropped trailing context (removed in 0.5.0)
+
+Fixed by **removing** the `INDEX@lo-hi` added-line range selector entirely
+(0.5.0). Its contiguous-slice implementation dropped the trailing context on a
+leading/interior slice of a mid-file addition block, so `git apply` rejected the
+piece (`patch does not apply`). A contiguous slice cannot both omit the trailing
+additions and keep the context after them, so there was no in-place fix; the
+per-line `@L<set>` cutter already keeps both leading and trailing context and
+strictly subsumes `@lo-hi` (it can express any added-line range plus deletions,
+interior slices, and replacements). See ADR 0009. A selector still using the
+`@lo-hi` form is now a usage error (exit 2) that points the caller at `@L`.
 
 ## Per-line cutting: remaining edges
 

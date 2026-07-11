@@ -29,8 +29,7 @@ struct JsonHunk {
     new_lines: u32,
     added: u32,
     deleted: u32,
-    /// True when the sub-hunk is all additions and can be cut at any added line via
-    /// `select INDEX@lo-hi`.
+    /// True when the sub-hunk is all additions (a file-creation or pure-append block).
     addition_only: bool,
     /// The sub-hunk's changed (`+`/`-`) lines, in body order, each with its 1-based index for
     /// `select INDEX@L<set>`. Additions and deletions share one numbering. Empty for a binary
@@ -76,8 +75,8 @@ fn header_string(h: &Hunk) -> String {
     s
 }
 
-/// True when the sub-hunk consists solely of additions (no context, no deletions): it can be
-/// cut at any added line with `select INDEX@lo-hi`. An empty body is not addition-only.
+/// True when the sub-hunk consists solely of additions (no context, no deletions): a
+/// file-creation or pure-append block. An empty body is not addition-only.
 fn addition_only(h: &Hunk) -> bool {
     !h.lines.is_empty() && h.lines.iter().all(|l| matches!(l.kind, LineKind::Add))
 }
@@ -179,7 +178,7 @@ pub fn list_human(patch: &Patch, color: bool) -> String {
             };
             // Write directly into the output buffer rather than building a temporary
             // String per line (this runs once per sub-hunk).
-            let marker = if addition_only(h) { " [+range]" } else { "" };
+            let marker = if addition_only(h) { " [+add]" } else { "" };
             let _ = writeln!(
                 out,
                 "  {idx} {id} {}  +{added} -{deleted}{marker}  {pv}",
@@ -319,7 +318,7 @@ new file mode 100644
         let p = parse(NEW_FILE.as_bytes()).unwrap();
         let out = list_human(&p, false);
         assert!(
-            out.contains("[+range]"),
+            out.contains("[+add]"),
             "addition-only marker missing:\n{out}"
         );
     }
@@ -329,7 +328,7 @@ new file mode 100644
         let p = parse(MULTI.as_bytes()).unwrap();
         let out = list_human(&p, false);
         assert!(
-            !out.contains("[+range]"),
+            !out.contains("[+add]"),
             "addition-only marker must not appear for a mixed sub-hunk:\n{out}"
         );
     }
@@ -396,6 +395,6 @@ diff --git a/f b/f
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
         assert_eq!(v[0]["hunks"][0]["addition_only"], false);
-        assert!(!list_human(&p, false).contains("[+range]"));
+        assert!(!list_human(&p, false).contains("[+add]"));
     }
 }

@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-11
+
+### Removed
+
+- **Breaking:** the `[path:]INDEX@lo-hi` added-line range selector (added in
+  0.4.0) is removed. Its contiguous-slice implementation produced an
+  unapplicable hunk for a leading or interior slice of an addition block placed
+  mid-file: it kept the leading context but dropped the trailing context, so
+  `git apply` could not anchor the piece (`patch does not apply`). The per-line
+  `[path:]INDEX@L<set>` selector supersedes it: `@L` addresses any subset of a
+  sub-hunk's changed lines, keeps both leading and trailing context (every
+  subset applies), and can express any added-line range plus what `@lo-hi`
+  could not (deletions, interior slices, replacements). A selector that still
+  uses the `@lo-hi` form now fails with exit 2 and a message pointing at the
+  `@L` replacement.
+
+### Changed
+
+- The human `list` marker for an all-additions sub-hunk is renamed from
+  `[+range]` to `[+add]` (the `@lo-hi` range form it advertised is gone). The
+  `addition_only` field in `list --json` is unchanged.
+
 ## [0.4.0] - 2026-07-05
 
 ### Added

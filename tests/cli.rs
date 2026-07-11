@@ -193,7 +193,7 @@ fn no_verify_internal_flag_accepted() {
 }
 
 // ---------------------------------------------------------------------------
-// range selector (INDEX@lo-hi) end-to-end tests
+// changed-line selector (INDEX@L<set>) end-to-end tests
 // ---------------------------------------------------------------------------
 
 /// A file-creation diff: four added lines, one atomic addition-only sub-hunk.
@@ -210,10 +210,10 @@ new file mode 100644
 ";
 
 #[test]
-fn select_added_line_range_first_part() {
+fn select_changed_lines_first_part() {
     Command::cargo_bin("hunkpick")
         .unwrap()
-        .args(["select", "1@1-2"])
+        .args(["select", "1@L1,2"])
         .write_stdin(NEW_FILE_DIFF)
         .assert()
         .success()
@@ -224,23 +224,10 @@ fn select_added_line_range_first_part() {
 }
 
 #[test]
-fn select_added_line_range_open_end() {
+fn select_changed_lines_out_of_range_is_usage_error() {
     Command::cargo_bin("hunkpick")
         .unwrap()
-        .args(["select", "1@3-"])
-        .write_stdin(NEW_FILE_DIFF)
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("+l3"))
-        .stdout(predicate::str::contains("+l4"))
-        .stdout(predicate::str::contains("+l2").not());
-}
-
-#[test]
-fn select_range_out_of_range_is_usage_error() {
-    Command::cargo_bin("hunkpick")
-        .unwrap()
-        .args(["select", "1@1-99"])
+        .args(["select", "1@L1-99"])
         .write_stdin(NEW_FILE_DIFF)
         .assert()
         .failure()
@@ -248,7 +235,22 @@ fn select_range_out_of_range_is_usage_error() {
 }
 
 #[test]
-fn range_split_new_file_first_part_stages_only_those_lines() {
+fn removed_lo_hi_range_form_is_friendly_usage_error() {
+    // The old `@lo-hi` added-line range form was removed. Using it must fail with exit 2 and a
+    // message that steers the caller to `@L`, not a bare "bad selector".
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "1@1-2"])
+        .write_stdin(NEW_FILE_DIFF)
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("@lo-hi"))
+        .stderr(predicate::str::contains("@L"));
+}
+
+#[test]
+fn changed_lines_split_new_file_first_part_stages_only_those_lines() {
     let dir = common::repo_with(&[]); // empty initial commit
     std::fs::write(dir.path().join("new.txt"), "l1\nl2\nl3\nl4\n").unwrap();
     common::sys(&dir, &["add", "-N", "new.txt"]); // intent-to-add: diff shows file creation
@@ -263,7 +265,7 @@ fn range_split_new_file_first_part_stages_only_those_lines() {
 
     let part1 = Command::cargo_bin("hunkpick")
         .unwrap()
-        .args(["select", "1@1-2"])
+        .args(["select", "1@L1,2"])
         .write_stdin(diff.clone())
         .assert()
         .success()
@@ -290,35 +292,16 @@ fn range_split_new_file_first_part_stages_only_those_lines() {
 }
 
 #[test]
-fn select_disjoint_ranges_reverse_order_succeeds() {
-    // Two disjoint ranges of one sub-hunk typed in descending order must succeed and emit both,
-    // not be rejected for the order they were typed in.
+fn select_whole_and_lineset_of_same_subhunk_exits_2() {
+    // A whole sub-hunk plus an `@L` subset of the same sub-hunk is a selector error (exit 2),
+    // reported before emission. `--no-verify-result-diff-internal` disables only the result-diff
+    // self-check; it must NOT turn this into a silent success that emits a corrupt diff.
     Command::cargo_bin("hunkpick")
         .unwrap()
-        .args(["select", "1@3-4", "1@1-2"])
-        .write_stdin(NEW_FILE_DIFF)
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("+l1"))
-        .stdout(predicate::str::contains("+l4"));
-}
-
-#[test]
-fn select_overlapping_ranges_exits_2_even_without_internal_verify() {
-    // Overlapping ranges of one sub-hunk are a selector error (exit 2), reported before emission.
-    // `--no-verify-result-diff-internal` disables only the result-diff self-check; it must NOT
-    // turn this into a silent success that emits a corrupt diff.
-    Command::cargo_bin("hunkpick")
-        .unwrap()
-        .args([
-            "select",
-            "--no-verify-result-diff-internal",
-            "1@1-3",
-            "1@2-4",
-        ])
+        .args(["select", "--no-verify-result-diff-internal", "1", "1@L1,2"])
         .write_stdin(NEW_FILE_DIFF)
         .assert()
         .failure()
         .code(2)
-        .stderr(predicate::str::contains("overlapping"));
+        .stderr(predicate::str::contains("sub-hunk 1"));
 }

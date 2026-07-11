@@ -4,7 +4,7 @@ Date: 2026-06-24
 
 ## Status
 
-Accepted
+Superseded by [ADR 0009](0009-changed-line-addressing-supersedes-range.md)
 
 Complements ADR 0007 (content-id and wildcard addressing).
 
