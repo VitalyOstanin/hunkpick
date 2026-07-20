@@ -61,10 +61,12 @@ fn run() -> Result<(), AppError> {
             };
             let (fi, hi) = select::resolve_hunk(&patch, &hunk).map_err(usage)?;
             let mut out = patch.clone();
-            if let model::FileContent::Text(hunks) = &mut out.files[fi].content {
-                let pieces = split::split_hunk_at(&hunks[hi], &at).map_err(usage)?;
-                hunks.splice(hi..=hi, pieces);
-            }
+            // `resolve_hunk` already rejected binary files, so the target is always text.
+            let model::FileContent::Text(hunks) = &mut out.files[fi].content else {
+                unreachable!("resolve_hunk guarantees a text file");
+            };
+            let pieces = split::split_hunk_at(&hunks[hi], &at).map_err(usage)?;
+            hunks.splice(hi..=hi, pieces);
             emit_verified(&out, &verify)
         }
     }
