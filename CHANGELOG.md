@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-07-21
+
+### Fixed
+
+- `parse` no longer mistakes a deletion line whose content begins with `-- `
+  for a new-file header. Such a deletion renders as `--- <text>` in the hunk
+  body; new-file detection previously triggered on any `--- ` line while inside
+  a hunk, dropping the real change and emitting a phantom file. The parser now
+  tracks the old/new line counts declared by the hunk header and only treats
+  `--- ` as the next file once the current hunk body is fully consumed.
+- `read_limited` no longer overflows `limit + 1` at `--max-input-bytes`
+  `18446744073709551615` (`u64::MAX`), which wrapped to `0` in release builds
+  and silently treated any input as empty. It now uses a saturating add.
+- `split --at` on a hunk's first context line no longer emits a leading
+  context-only piece with zero net change (a hunk `git apply` rejects); such a
+  piece is dropped.
+
 ## [0.5.0] - 2026-07-11
 
 ### Removed
