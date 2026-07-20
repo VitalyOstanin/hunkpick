@@ -19,7 +19,14 @@ impl fmt::Display for ParseError {
 pub fn parse(input: &[u8]) -> Result<Patch, ParseError> {
     let mut files: Vec<FileDiff> = Vec::new();
     let mut cur: Option<FileDiff> = None;
+    // `in_hunk` — внутри тела ханка, чьи объявленные строки ещё не исчерпаны.
+    // `saw_hunk` — текущий файл уже имел хотя бы один ханк (нужно для детекции
+    // следующего файла в plain-диффе). `rem_old`/`rem_new` — сколько строк
+    // из объявленных в заголовке ханка (`-os,ol +ns,nl`) осталось прочитать.
     let mut in_hunk = false;
+    let mut saw_hunk = false;
+    let mut rem_old: u32 = 0;
+    let mut rem_new: u32 = 0;
 
     let mut lines = input.split(|&b| b == b'\n').peekable();
     while let Some(line) = lines.next() {
@@ -39,12 +46,19 @@ pub fn parse(input: &[u8]) -> Result<Patch, ParseError> {
                 content: FileContent::Text(Vec::new()),
             });
             in_hunk = false;
+            saw_hunk = false;
             continue;
         }
 
-        // Plain (non-git) diff: a file starts at "--- " when not already building one,
-        // or when the current file already has hunks (next file).
-        if line.starts_with(b"--- ") && (cur.is_none() || in_hunk) {
+        // Plain (non-git) diff: a file starts at "--- " when not already building
+        // one, or when the current file's last hunk has consumed all its declared
+        // lines (next file). The `rem_old == 0 && rem_new == 0` guard is essential:
+        // inside a hunk body a deletion line whose content begins with "-- "
+        // renders as "--- <text>" and must be consumed as a deletion, not mistaken
+        // for a file header.
+        if line.starts_with(b"--- ")
+            && (cur.is_none() || (saw_hunk && rem_old == 0 && rem_new == 0))
+        {
             if let Some(f) = cur.take() {
                 files.push(f);
             }
@@ -55,6 +69,7 @@ pub fn parse(input: &[u8]) -> Result<Patch, ParseError> {
                 content: FileContent::Text(Vec::new()),
             });
             in_hunk = false;
+            saw_hunk = false;
         }
 
         let Some(f) = cur.as_mut() else {
@@ -66,8 +81,12 @@ pub fn parse(input: &[u8]) -> Result<Patch, ParseError> {
             let FileContent::Text(hunks) = &mut f.content else {
                 return Err(ParseError::Unexpected("hunk in binary file".into()));
             };
+            rem_old = hunk.old_lines;
+            rem_new = hunk.new_lines;
             hunks.push(hunk);
-            in_hunk = true;
+            saw_hunk = true;
+            // A degenerate hunk declaring zero lines has no body to consume.
+            in_hunk = rem_old != 0 || rem_new != 0;
             continue;
         }
 
@@ -77,15 +96,27 @@ pub fn parse(input: &[u8]) -> Result<Patch, ParseError> {
             };
             let h = hunks.last_mut().unwrap();
             match line.first() {
-                Some(b' ') => h.lines.push(mk_line(LineKind::Context, &line[1..])),
-                Some(b'+') => h.lines.push(mk_line(LineKind::Add, &line[1..])),
-                Some(b'-') => h.lines.push(mk_line(LineKind::Del, &line[1..])),
+                Some(b' ') => {
+                    h.lines.push(mk_line(LineKind::Context, &line[1..]));
+                    rem_old = rem_old.saturating_sub(1);
+                    rem_new = rem_new.saturating_sub(1);
+                }
+                Some(b'+') => {
+                    h.lines.push(mk_line(LineKind::Add, &line[1..]));
+                    rem_new = rem_new.saturating_sub(1);
+                }
+                Some(b'-') => {
+                    h.lines.push(mk_line(LineKind::Del, &line[1..]));
+                    rem_old = rem_old.saturating_sub(1);
+                }
                 _ if line.starts_with(b"\\ ") => {
                     if let Some(last) = h.lines.last_mut() {
                         last.no_newline = true;
                     }
                 }
                 _ => {
+                    // Non-body line before the declared count is exhausted:
+                    // treat the hunk as ended and reinterpret this line as a header.
                     in_hunk = false;
                     push_header(f, line);
                 }
@@ -304,6 +335,32 @@ Binary files a/img.png and b/img.png differ
 ";
         let p = parse(src.as_bytes()).unwrap();
         assert!(matches!(p.files[0].content, FileContent::Binary(_)));
+    }
+
+    #[test]
+    fn deletion_line_dash_dash_not_mistaken_for_file_header() {
+        // A deletion whose content starts with "-- " renders as "--- <text>";
+        // inside a hunk body it must be consumed as a deletion, not a new file.
+        let src = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,2 +1,2 @@
+ xyz
+--- old comment
++++ new comment
+";
+        let p = parse(src.as_bytes()).unwrap();
+        assert_eq!(p.files.len(), 1, "no phantom file");
+        let FileContent::Text(h) = &p.files[0].content else {
+            panic!()
+        };
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].lines.len(), 3);
+        assert_eq!(h[0].lines[1].kind, LineKind::Del);
+        assert_eq!(h[0].lines[1].text.as_slice(), b"-- old comment");
+        assert_eq!(h[0].lines[2].kind, LineKind::Add);
+        assert_eq!(h[0].lines[2].text.as_slice(), b"++ new comment");
     }
 
     #[test]
