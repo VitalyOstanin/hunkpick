@@ -18,6 +18,14 @@ pub enum ValidationError {
         file: String,
         hunk_index: usize,
     },
+    /// A hunk whose body is all context (no `+`/`-` lines). The count checks pass it
+    /// (`old_lines == new_lines == ctx`), yet `git apply` rejects a hunk with no changes.
+    /// Unreachable from a real git diff (git never emits a change-free hunk) but possible
+    /// from a synthetic patch, so reject it explicitly.
+    NoChangeHunk {
+        file: String,
+        hunk_index: usize,
+    },
 }
 
 /// Internal consistency check of a result diff. Git-agnostic, O(total lines).
@@ -39,6 +47,15 @@ pub fn validate_internal(patch: &Patch) -> Result<(), ValidationError> {
                 });
             }
             let (ctx, add, del) = count_kinds(&h.lines);
+            // A change-free (all-context) hunk passes the count checks but git apply rejects
+            // it. `EmptyHunk` above only catches a zero-line body, so guard the non-empty
+            // all-context case here.
+            if add == 0 && del == 0 {
+                return Err(ValidationError::NoChangeHunk {
+                    file: path.clone(),
+                    hunk_index: i,
+                });
+            }
             if h.old_lines != ctx + del {
                 return Err(ValidationError::CountMismatch {
                     file: path.clone(),
@@ -191,6 +208,37 @@ diff --git a/f b/f
         assert!(matches!(
             validate_internal(&p),
             Err(ValidationError::EmptyHunk { .. })
+        ));
+    }
+
+    #[test]
+    fn all_context_hunk_is_caught() {
+        let mut p = parse(
+            "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,3 +1,3 @@
+ a
+-b
++B
+ c
+"
+            .as_bytes(),
+        )
+        .unwrap();
+        // Turn the change lines into context: a change-free hunk whose counts still balance
+        // (old_lines == new_lines == ctx) but which git apply rejects.
+        if let FileContent::Text(h) = &mut p.files[0].content {
+            for l in &mut h[0].lines {
+                l.kind = LineKind::Context;
+            }
+            h[0].old_lines = 3;
+            h[0].new_lines = 3;
+        }
+        assert!(matches!(
+            validate_internal(&p),
+            Err(ValidationError::NoChangeHunk { .. })
         ));
     }
 
