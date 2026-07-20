@@ -111,8 +111,10 @@ fn read_limited<R: Read>(r: R, limit: u64) -> Result<Vec<u8>, AppError> {
         return Ok(buf);
     }
     // Read one byte past the limit so an exactly-`limit` input is accepted but anything
-    // larger is detected without buffering the whole oversized stream.
-    r.take(limit + 1)
+    // larger is detected without buffering the whole oversized stream. `saturating_add`
+    // guards the degenerate `limit == u64::MAX`: `limit + 1` would wrap to 0 (release) or
+    // panic (debug), reading nothing; saturating keeps the whole stream readable.
+    r.take(limit.saturating_add(1))
         .read_to_end(&mut buf)
         .map_err(|e| AppError::Io(e.to_string()))?;
     if buf.len() as u64 > limit {
@@ -165,4 +167,25 @@ fn emit_verified(out: &model::Patch, verify: &VerifyOpts) -> Result<(), AppError
         validate::validate_with_git(&bytes, &dir).map_err(AppError::Verify)?;
     }
     write_out(&bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_limited_accepts_input_at_max_limit() {
+        // `limit == u64::MAX` must not wrap `limit + 1` to 0 (which would read nothing
+        // and silently treat any input as empty). The whole input must be returned.
+        let data = b"diff --git a/f b/f\n";
+        let got = read_limited(&data[..], u64::MAX).unwrap();
+        assert_eq!(got, data);
+    }
+
+    #[test]
+    fn read_limited_rejects_oversized_input() {
+        let data = b"0123456789";
+        let err = read_limited(&data[..], 4).unwrap_err();
+        assert!(matches!(err, AppError::Usage(_)));
+    }
 }
