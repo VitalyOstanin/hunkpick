@@ -70,7 +70,6 @@ pub fn auto_split_hunk(h: &Hunk) -> Vec<Hunk> {
 
 /// Explicitly split a hunk at the given new-file line numbers (context lines only).
 pub fn split_hunk_at(h: &Hunk, new_line_cuts: &[u32]) -> Result<Vec<Hunk>, SplitError> {
-    use std::collections::BTreeSet;
     let mut new_no = h.new_start;
     let mut cut_indices: Vec<usize> = Vec::new();
     let mut wanted: BTreeSet<u32> = new_line_cuts.iter().copied().collect();

@@ -2,7 +2,7 @@ use crate::model::*;
 use crate::split::auto_split_hunk;
 use crate::split::slice_changed_lines;
 use crate::subhunk_id::subhunk_hash;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -316,8 +316,7 @@ pub fn select(patch: &Patch, selectors: &[Selector]) -> Result<Patch, SelectErro
     // Auto-split lazily, only for files a selector actually names, and cache by file index so
     // each referenced file is split once (selectors may target the same file repeatedly). The
     // cache is shared between the resolution and emission phases below.
-    let mut subs_cache: std::collections::BTreeMap<usize, Vec<Hunk>> =
-        std::collections::BTreeMap::new();
+    let mut subs_cache: BTreeMap<usize, Vec<Hunk>> = BTreeMap::new();
     let chosen = resolve_selectors(patch, selectors, &mut subs_cache)?;
     if chosen.is_empty() {
         return Err(SelectError::EmptySelection);
@@ -331,10 +330,9 @@ pub fn select(patch: &Patch, selectors: &[Selector]) -> Result<Patch, SelectErro
 fn resolve_selectors(
     patch: &Patch,
     selectors: &[Selector],
-    subs_cache: &mut std::collections::BTreeMap<usize, Vec<Hunk>>,
-) -> Result<std::collections::BTreeMap<usize, Vec<Chosen>>, SelectError> {
-    let mut chosen: std::collections::BTreeMap<usize, Vec<Chosen>> =
-        std::collections::BTreeMap::new();
+    subs_cache: &mut BTreeMap<usize, Vec<Hunk>>,
+) -> Result<BTreeMap<usize, Vec<Chosen>>, SelectError> {
+    let mut chosen: BTreeMap<usize, Vec<Chosen>> = BTreeMap::new();
     for sel in selectors {
         match sel {
             Selector::Id(id) => resolve_id(patch, id, subs_cache, &mut chosen)?,
@@ -399,8 +397,8 @@ fn resolve_selectors(
 /// splits for every referenced file (populated by `resolve_selectors`).
 fn emit_selection(
     patch: &Patch,
-    chosen: std::collections::BTreeMap<usize, Vec<Chosen>>,
-    subs_cache: &std::collections::BTreeMap<usize, Vec<Hunk>>,
+    chosen: BTreeMap<usize, Vec<Chosen>>,
+    subs_cache: &BTreeMap<usize, Vec<Hunk>>,
 ) -> Result<Patch, SelectError> {
     let mut files = Vec::new();
     for (fi, mut picks) in chosen {
@@ -467,8 +465,8 @@ fn emit_selection(
 fn resolve_id(
     patch: &Patch,
     id: &str,
-    subs_cache: &mut std::collections::BTreeMap<usize, Vec<Hunk>>,
-    chosen: &mut std::collections::BTreeMap<usize, Vec<Chosen>>,
+    subs_cache: &mut BTreeMap<usize, Vec<Hunk>>,
+    chosen: &mut BTreeMap<usize, Vec<Chosen>>,
 ) -> Result<(), SelectError> {
     // Compare 64-bit hashes rather than rendered hex strings to avoid an allocation per
     // sub-hunk across the full scan. `from_str_radix` accepts upper- or lowercase hex.
