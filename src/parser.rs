@@ -19,10 +19,10 @@ impl fmt::Display for ParseError {
 pub fn parse(input: &[u8]) -> Result<Patch, ParseError> {
     let mut files: Vec<FileDiff> = Vec::new();
     let mut cur: Option<FileDiff> = None;
-    // `in_hunk` — внутри тела ханка, чьи объявленные строки ещё не исчерпаны.
-    // `saw_hunk` — текущий файл уже имел хотя бы один ханк (нужно для детекции
-    // следующего файла в plain-диффе). `rem_old`/`rem_new` — сколько строк
-    // из объявленных в заголовке ханка (`-os,ol +ns,nl`) осталось прочитать.
+    // `in_hunk` — inside a hunk body whose declared lines are not yet exhausted.
+    // `saw_hunk` — the current file has already had at least one hunk (needed to
+    // detect the next file in a plain diff). `rem_old`/`rem_new` — how many of the
+    // lines declared in the hunk header (`-os,ol +ns,nl`) remain to be read.
     let mut in_hunk = false;
     let mut saw_hunk = false;
     let mut rem_old: u32 = 0;
@@ -95,19 +95,24 @@ pub fn parse(input: &[u8]) -> Result<Patch, ParseError> {
                 unreachable!()
             };
             let h = hunks.last_mut().unwrap();
+            // A body line belongs to the hunk only while the relevant declared count has
+            // budget: context consumes one old and one new, `+` one new, `-` one old. Once a
+            // side is exhausted, a further line of that kind is not part of this hunk (the
+            // header over-declared or the diff is malformed) — treat the hunk as ended and
+            // reinterpret the line as a header, rather than appending past the declared size.
             match line.first() {
-                Some(b' ') => {
+                Some(b' ') if rem_old > 0 && rem_new > 0 => {
                     h.lines.push(mk_line(LineKind::Context, &line[1..]));
-                    rem_old = rem_old.saturating_sub(1);
-                    rem_new = rem_new.saturating_sub(1);
+                    rem_old -= 1;
+                    rem_new -= 1;
                 }
-                Some(b'+') => {
+                Some(b'+') if rem_new > 0 => {
                     h.lines.push(mk_line(LineKind::Add, &line[1..]));
-                    rem_new = rem_new.saturating_sub(1);
+                    rem_new -= 1;
                 }
-                Some(b'-') => {
+                Some(b'-') if rem_old > 0 => {
                     h.lines.push(mk_line(LineKind::Del, &line[1..]));
-                    rem_old = rem_old.saturating_sub(1);
+                    rem_old -= 1;
                 }
                 _ if line.starts_with(b"\\ ") => {
                     if let Some(last) = h.lines.last_mut() {
@@ -115,8 +120,8 @@ pub fn parse(input: &[u8]) -> Result<Patch, ParseError> {
                     }
                 }
                 _ => {
-                    // Non-body line before the declared count is exhausted:
-                    // treat the hunk as ended and reinterpret this line as a header.
+                    // Either a non-body line, or a body line past the declared count: the hunk
+                    // has ended. Reinterpret this line as a header.
                     in_hunk = false;
                     push_header(f, line);
                 }
