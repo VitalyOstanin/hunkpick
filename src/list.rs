@@ -95,17 +95,26 @@ fn preview(h: &Hunk) -> String {
 pub fn list_json(patch: &Patch) -> String {
     use crate::subhunk_id::subhunk_hash;
     let view = build_view(patch);
+    // Hash each sub-hunk once, keeping the per-file hashes alongside the view so the second
+    // pass reuses them instead of recomputing. `hashes[vi][si]` is the hash of the `si`-th
+    // sub-hunk of the `vi`-th view entry.
+    let hashes: Vec<Vec<u64>> = view
+        .iter()
+        .map(|(fi, subs)| {
+            let f = &patch.files[*fi];
+            subs.iter().map(|h| subhunk_hash(f, h)).collect()
+        })
+        .collect();
     // Histogram of content hashes across the whole patch, so each sub-hunk can report how
     // many sub-hunks share its id (`id_count`).
     let mut counts: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-    for (fi, subs) in &view {
-        let f = &patch.files[*fi];
-        for h in subs {
-            *counts.entry(subhunk_hash(f, h)).or_insert(0) += 1;
+    for file_hashes in &hashes {
+        for hash in file_hashes {
+            *counts.entry(*hash).or_insert(0) += 1;
         }
     }
     let mut files = Vec::new();
-    for (fi, subs) in &view {
+    for (vi, (fi, subs)) in view.iter().enumerate() {
         let f = &patch.files[*fi];
         let binary = matches!(f.content, FileContent::Binary(_));
         let hunks = subs
@@ -113,7 +122,7 @@ pub fn list_json(patch: &Patch) -> String {
             .enumerate()
             .map(|(i, h)| {
                 let (added, deleted) = h.change_counts();
-                let hash = subhunk_hash(f, h);
+                let hash = hashes[vi][i];
                 JsonHunk {
                     index: i + 1,
                     id: format!("{hash:016x}"),
@@ -137,7 +146,9 @@ pub fn list_json(patch: &Patch) -> String {
             hunks,
         });
     }
-    serde_json::to_string_pretty(&files).unwrap()
+    // Infallible in practice: `JsonFile` serializes owned strings, integers and bools with
+    // no map keys or custom `Serialize` that could error. `expect` documents that invariant.
+    serde_json::to_string_pretty(&files).expect("serializing the JSON hunk list cannot fail")
 }
 
 // SGR (Select Graphic Rendition) parameter codes used for the human-readable listing.
