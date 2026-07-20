@@ -128,6 +128,12 @@ git diff src/main.rs | hunkpick list --json
 git diff src/main.rs | hunkpick list --color always
 ```
 
+Colour in the default `--color auto` mode follows stdout: on when it is a
+terminal, off when piped. The `NO_COLOR` environment variable (any non-empty
+value) forces it off; `CLICOLOR_FORCE` (any non-empty value) forces it on even
+when piped. `NO_COLOR` takes precedence when both are set. An explicit
+`--color always|never` overrides all of these.
+
 **Example human output:**
 
 ```

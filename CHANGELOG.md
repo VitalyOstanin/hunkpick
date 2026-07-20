@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `CLICOLOR_FORCE` (any non-empty value) forces coloured output in the default
+  `--color auto` mode even when stdout is not a terminal (e.g. a pipe).
+  `NO_COLOR` still takes precedence when both are set, and an explicit
+  `--color always|never` overrides both.
+
+### Changed
+
+- Result-diff validation now rejects a change-free (all-context) hunk with a
+  dedicated `NoChangeHunk` error. Such a hunk balances the header counts but
+  `git apply` rejects it; it is unreachable from a real git diff and only
+  possible from a synthetic patch.
+- The parser no longer appends body lines past the counts declared in a hunk
+  header: once a side's declared count is exhausted, a further line of that kind
+  ends the hunk instead of being absorbed into it. Well-formed git diffs are
+  unaffected.
+
 ## [0.5.1] - 2026-07-21
 
 ### Fixed

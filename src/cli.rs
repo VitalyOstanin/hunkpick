@@ -125,6 +125,10 @@ pub struct InputOpts {
     pub max_input_bytes: u64,
 }
 
+// The help text for `select` uses `L<set>` as a placeholder metavariable. These `///`
+// comments are surfaced verbatim by clap in `--help`, so wrapping the token in backticks or
+// escaping the `<` would leak into the CLI output; suppress the rustdoc HTML-tag lint instead.
+#[allow(rustdoc::invalid_html_tags)]
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// List the addressable sub-hunks of each file.
@@ -214,18 +218,33 @@ pub enum ColorMode {
     Never,
 }
 
-/// Resolve whether to colorize, based on the mode, stdout TTY state and NO_COLOR.
+/// Resolve whether to colorize, based on the mode, stdout TTY state, `NO_COLOR` and
+/// `CLICOLOR_FORCE`. An environment variable counts as set only when its value is non-empty
+/// (per the `NO_COLOR` and CLICOLOR conventions: a bare or empty value is ignored).
 pub fn resolve_color(mode: ColorMode) -> bool {
     let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let no_color = std::env::var_os("NO_COLOR").is_some();
-    resolve_color_with(mode, is_tty, no_color)
+    let no_color = env_flag_set("NO_COLOR");
+    let clicolor_force = env_flag_set("CLICOLOR_FORCE");
+    resolve_color_with(mode, is_tty, no_color, clicolor_force)
 }
 
-pub fn resolve_color_with(mode: ColorMode, is_tty: bool, no_color: bool) -> bool {
+/// True when environment variable `name` is set to a non-empty value.
+fn env_flag_set(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|v| !v.is_empty())
+}
+
+pub fn resolve_color_with(
+    mode: ColorMode,
+    is_tty: bool,
+    no_color: bool,
+    clicolor_force: bool,
+) -> bool {
     match mode {
         ColorMode::Always => true,
         ColorMode::Never => false,
-        ColorMode::Auto => is_tty && !no_color,
+        // `CLICOLOR_FORCE` forces color on a non-tty (e.g. a pipe); `NO_COLOR` still wins so a
+        // hard opt-out is always honoured.
+        ColorMode::Auto => (is_tty || clicolor_force) && !no_color,
     }
 }
 
@@ -237,19 +256,27 @@ mod tests {
 
     #[test]
     fn never_disables_color() {
-        assert!(!resolve_color_with(ColorMode::Never, true, false));
+        assert!(!resolve_color_with(ColorMode::Never, true, false, false));
     }
 
     #[test]
     fn always_enables_even_without_tty() {
-        assert!(resolve_color_with(ColorMode::Always, false, false));
+        assert!(resolve_color_with(ColorMode::Always, false, false, false));
     }
 
     #[test]
     fn auto_follows_tty_unless_no_color() {
-        assert!(resolve_color_with(ColorMode::Auto, true, false));
-        assert!(!resolve_color_with(ColorMode::Auto, true, true));
-        assert!(!resolve_color_with(ColorMode::Auto, false, false));
+        assert!(resolve_color_with(ColorMode::Auto, true, false, false));
+        assert!(!resolve_color_with(ColorMode::Auto, true, true, false));
+        assert!(!resolve_color_with(ColorMode::Auto, false, false, false));
+    }
+
+    #[test]
+    fn auto_clicolor_force_enables_on_non_tty() {
+        // CLICOLOR_FORCE turns color on when stdout is not a tty...
+        assert!(resolve_color_with(ColorMode::Auto, false, false, true));
+        // ...but NO_COLOR still wins over CLICOLOR_FORCE.
+        assert!(!resolve_color_with(ColorMode::Auto, false, true, true));
     }
 
     #[test]
