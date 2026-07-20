@@ -1,0 +1,42 @@
+name: resolve-release-tag
+description: >-
+  Single source of truth for "what are we releasing". Resolves the release tag
+  from either the pushed ref or the workflow_dispatch input, validates its
+  `vX.Y.Z[-pre+build]` format, and exposes both the tag (with `v` prefix, e.g.
+  `v0.1.0`) and the version (without prefix, e.g. `0.1.0`). The dispatch input
+  flows through `env:` rather than being interpolated into the shell body, so a
+  malicious tag value cannot smuggle commands at template-expansion time.
+
+inputs:
+  tag:
+    description: 'The workflow_dispatch tag input (empty on a tag push).'
+    required: false
+    default: ''
+
+outputs:
+  tag:
+    description: 'Resolved tag with the `v` prefix (e.g. v0.1.0).'
+    value: ${{ steps.tag.outputs.tag }}
+  version:
+    description: 'Resolved version without the `v` prefix (e.g. 0.1.0).'
+    value: ${{ steps.tag.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve tag and version
+      id: tag
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        TAG_INPUT: ${{ inputs.tag }}
+      run: |
+        if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+          TAG="$TAG_INPUT"
+        else
+          TAG="${GITHUB_REF#refs/tags/}"
+        fi
+        bash scripts/release-validate-tag.sh "$TAG"
+        VERSION="${TAG#v}"
+        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"

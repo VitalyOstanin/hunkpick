@@ -49,17 +49,26 @@ jobs:
         # windows + macos round out the published-binary platforms.
         os: [ubuntu-24.04, ubuntu-26.04, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+      # Prebuilt nextest binary: the .config/nextest.toml profile enforces a
+      # per-test timeout and bounded parallelism that `cargo test` cannot
+      # express. Mirrors the CI test job so the release gate runs the same way.
+      - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: cargo-nextest
       - name: Fetch dependencies (with retry)
         uses: ./.github/actions/cargo-fetch-retry
       - name: cargo build
         run: cargo build --verbose
-      - name: cargo test
-        run: cargo test --all-features --verbose
+      - name: Run tests
+        run: cargo nextest run --all-features
+      # nextest does not run doctests; keep them covered explicitly.
+      - name: Run doctests
+        run: cargo test --all-features --doc
 
   lint:
     name: Lint (fmt + clippy)
@@ -68,13 +77,13 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
       - name: Fetch dependencies (with retry)
         uses: ./.github/actions/cargo-fetch-retry
       - name: cargo fmt --check
@@ -89,11 +98,11 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
-      - uses: dtolnay/rust-toolchain@1.85.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@8641a17e25bf5b40c118d48fe0f81e8655731839 # 1.85.0
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
       - name: Fetch dependencies (with retry)
         uses: ./.github/actions/cargo-fetch-retry
       - name: cargo build --locked
@@ -109,39 +118,24 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
       - name: Fetch dependencies (with retry)
         uses: ./.github/actions/cargo-fetch-retry
 
       - name: Resolve tag and version
         # Single source of truth for "what are we releasing". Both push and
-        # workflow_dispatch end here; later steps read steps.tag.outputs.tag
+        # workflow_dispatch resolve here; later steps read steps.tag.outputs.tag
         # (with `v` prefix, e.g. `v0.1.0`) and steps.tag.outputs.version
-        # (without prefix, e.g. `0.1.0`) instead of re-deriving them.
-        #
-        # The workflow_dispatch input is passed through `env:` rather than
-        # interpolated into the shell body so a malicious tag value cannot
-        # smuggle commands at template-expansion time.
-        # `release-validate-tag.sh` then enforces the `vX.Y.Z[-pre+build]`
-        # format on the resolved tag regardless of which trigger produced it.
+        # (without prefix, e.g. `0.1.0`) instead of re-deriving them. The same
+        # composite action is reused by the package-binaries job.
         id: tag
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          TAG_INPUT: ${{ inputs.tag }}
-        run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            TAG="$TAG_INPUT"
-          else
-            TAG="${GITHUB_REF#refs/tags/}"
-          fi
-          bash scripts/release-validate-tag.sh "$TAG"
-          VERSION="${TAG#v}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/resolve-release-tag
+        with:
+          tag: ${{ inputs.tag }}
 
       - name: Verify tag matches Cargo.toml and Cargo.lock versions
         env:
@@ -269,10 +263,10 @@ jobs:
             archive: zip
             binary: hunkpick.exe
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
       - name: Install GNU tar on macOS
@@ -282,7 +276,7 @@ jobs:
         # produces the same byte-for-byte layout as Linux.
         if: runner.os == 'macOS'
         run: brew install gnu-tar
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
           # Per-target cache key so the matrix entries do not stomp each
           # other's target/ directory.
@@ -291,25 +285,12 @@ jobs:
         uses: ./.github/actions/cargo-fetch-retry
 
       - name: Resolve tag and version
-        # Mirrors the publish job's resolve step: `inputs.tag` flows through
-        # `env:` (no YAML expansion into the shell), then
-        # `release-validate-tag.sh` enforces the format before any later step
-        # consumes the value.
+        # Same composite action as the publish job — the single source of truth
+        # for the release tag/version.
         id: tag
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          TAG_INPUT: ${{ inputs.tag }}
-        run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            TAG="$TAG_INPUT"
-          else
-            TAG="${GITHUB_REF#refs/tags/}"
-          fi
-          bash scripts/release-validate-tag.sh "$TAG"
-          VERSION="${TAG#v}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/resolve-release-tag
+        with:
+          tag: ${{ inputs.tag }}
 
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
