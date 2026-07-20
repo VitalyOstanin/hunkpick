@@ -248,6 +248,13 @@ fn rebuild_pieces(h: &Hunk, starts: &[usize], ends: &[usize]) -> Vec<Hunk> {
             continue;
         }
         let slice = &h.lines[*start..*end];
+        // Skip context-only pieces. A cut on the hunk's first context line yields a
+        // leading slice with no Add/Del lines, which produces a hunk with zero net
+        // change that `git apply` rejects. Such a piece carries no change to stage.
+        let (_, add, del) = count_kinds(slice);
+        if add + del == 0 {
+            continue;
+        }
         result.push(rebuild_subhunk(h, slice, *start));
     }
     result
@@ -397,6 +404,21 @@ diff --git a/f b/f
             let add = s.lines.iter().filter(|l| l.kind == LineKind::Add).count() as u32;
             assert_eq!(s.old_lines, ctx + del);
             assert_eq!(s.new_lines, ctx + add);
+        }
+    }
+
+    #[test]
+    fn explicit_split_on_first_context_line_drops_context_only_piece() {
+        let h = hunk(TWO_CHANGES);
+        // New-file line numbers: a=1 B=2 c=3 D=4 e=5. Cut at the first context line a=1.
+        // The leading piece would be context-only (just `a`); it carries no change and
+        // must be dropped rather than emitted as a degenerate zero-change hunk.
+        let subs = split_hunk_at(&h, &[1]).unwrap();
+        for s in &subs {
+            let add = s.lines.iter().filter(|l| l.kind == LineKind::Add).count();
+            let del = s.lines.iter().filter(|l| l.kind == LineKind::Del).count();
+            assert!(add + del > 0, "no context-only sub-hunk emitted");
+            assert!(s.old_lines > 0 && s.new_lines > 0);
         }
     }
 
