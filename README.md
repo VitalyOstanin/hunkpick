@@ -3,6 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/hunkpick.svg)](https://crates.io/crates/hunkpick)
 [![docs.rs](https://docs.rs/hunkpick/badge.svg)](https://docs.rs/hunkpick)
 [![CI](https://github.com/VitalyOstanin/hunkpick/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/VitalyOstanin/hunkpick/actions/workflows/ci.yml?query=branch%3Amaster)
+[![codecov](https://codecov.io/gh/VitalyOstanin/hunkpick/graph/badge.svg?branch=master)](https://codecov.io/gh/VitalyOstanin/hunkpick)
 [![license](https://img.shields.io/crates/l/hunkpick.svg)](https://github.com/VitalyOstanin/hunkpick/blob/master/LICENSE)
 
 Non-interactive unified-diff hunk picker and splitter — a pure stdin→stdout filter for
