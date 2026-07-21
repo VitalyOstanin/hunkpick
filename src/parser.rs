@@ -189,10 +189,13 @@ fn strip_ab(s: &[u8]) -> Vec<u8> {
 fn parse_hunk_header(line: &[u8]) -> Result<Hunk, ParseError> {
     // Format: @@ -os[,ol] +ns[,nl] @@[ section]
     let bad = || ParseError::BadHunkHeader(String::from_utf8_lossy(line).into_owned());
+    // The ` @@` that closes the range portion of the header; its length drives the offset of the
+    // section text that follows.
+    const SEP: &[u8] = b" @@";
     let body = line.strip_prefix(b"@@ ").ok_or_else(bad)?;
-    let end = find_subslice(body, b" @@").ok_or_else(bad)?;
+    let end = find_subslice(body, SEP).ok_or_else(bad)?;
     let ranges = &body[..end];
-    let after = &body[end + 3..];
+    let after = &body[end + SEP.len()..];
     let section = after.strip_prefix(b" ").unwrap_or(after).to_vec();
     // The ranges portion (`-os,ol +ns,nl`) is ASCII for any valid hunk header.
     let ranges = std::str::from_utf8(ranges).map_err(|_| bad())?;

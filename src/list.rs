@@ -41,12 +41,9 @@ struct JsonHunk {
 
 /// The sub-hunk's changed (`+`/`-`) lines as JSON entries, 1-based in body order.
 fn changed_lines(h: &Hunk) -> Vec<JsonChangedLine> {
-    h.lines
-        .iter()
-        .filter(|l| !matches!(l.kind, LineKind::Context))
-        .enumerate()
-        .map(|(idx, l)| JsonChangedLine {
-            i: idx + 1,
+    h.changed_lines()
+        .map(|(i, l)| JsonChangedLine {
+            i,
             kind: match l.kind {
                 LineKind::Add => "add",
                 LineKind::Del => "del",

@@ -266,12 +266,13 @@ fn parse_index_list(s: &str) -> Result<Vec<usize>, SetParseError> {
 /// places (intentional duplicates, selected together); this distinguishes that case from an
 /// accidental hash collision between genuinely different changes, which must be rejected.
 pub(crate) fn all_same_content(items: &[(&FileDiff, &Hunk)]) -> bool {
-    /// The changed (added/deleted) lines of a sub-hunk, in order; context lines are excluded so
-    /// the same change in different surrounding context compares equal.
-    fn changed_lines(sub: &Hunk) -> impl Iterator<Item = &Line> {
-        sub.lines
-            .iter()
-            .filter(|l| !matches!(l.kind, LineKind::Context))
+    // Compare the changed (added/deleted) lines of two sub-hunks, in order; context lines are
+    // excluded so the same change in different surrounding context compares equal. Uses the shared
+    // `Hunk::changed_lines` numbering, dropping the index for a content-only comparison.
+    fn same_changed(a: &Hunk, b: &Hunk) -> bool {
+        a.changed_lines()
+            .map(|(_, l)| l)
+            .eq(b.changed_lines().map(|(_, l)| l))
     }
     let Some(((first_file, first_sub), rest)) = items.split_first() else {
         return true;
@@ -279,7 +280,7 @@ pub(crate) fn all_same_content(items: &[(&FileDiff, &Hunk)]) -> bool {
     rest.iter().all(|(f, s)| {
         f.new_path == first_file.new_path
             && f.old_path == first_file.old_path
-            && changed_lines(s).eq(changed_lines(first_sub))
+            && same_changed(s, first_sub)
     })
 }
 

@@ -124,11 +124,7 @@ pub fn split_hunk_at(h: &Hunk, new_line_cuts: &[u32]) -> Result<Vec<Hunk>, Split
 /// context, both counting toward `old_lines`). Errors if `selected` is empty or references a
 /// changed line outside `1..=changed`.
 pub fn slice_changed_lines(h: &Hunk, selected: &BTreeSet<usize>) -> Result<Hunk, SplitError> {
-    let changed = h
-        .lines
-        .iter()
-        .filter(|l| !matches!(l.kind, LineKind::Context))
-        .count();
+    let changed = h.changed_lines().count();
     if selected.is_empty() {
         return Err(SplitError::NoChangedLinesSelected);
     }

@@ -83,6 +83,20 @@ impl Hunk {
         let (_, add, del) = count_kinds(&self.lines);
         (add, del)
     }
+
+    /// The sub-hunk's changed (`+`/`-`) lines in body order, each paired with its 1-based index
+    /// over `1..=changed` (additions and deletions share one numbering). Context lines are
+    /// excluded. This is the single source of truth for "changed lines of a sub-hunk": the
+    /// content id ([`crate::subhunk_id`]), `list --json`'s `changed_lines`, and the
+    /// `INDEX@L<set>` slice numbering are all built from it, so their numbering agrees by
+    /// construction.
+    pub fn changed_lines(&self) -> impl Iterator<Item = (usize, &Line)> {
+        self.lines
+            .iter()
+            .filter(|l| !matches!(l.kind, LineKind::Context))
+            .enumerate()
+            .map(|(idx, l)| (idx + 1, l))
+    }
 }
 
 #[cfg(test)]

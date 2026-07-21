@@ -38,11 +38,11 @@ fn feed(h: &mut Fnv1a, file: &FileDiff, sub: &Hunk) {
     h.write_u8(0);
     h.write(file.old_path.as_deref().unwrap_or_default());
     h.write_u8(0);
-    for l in &sub.lines {
+    for (_, l) in sub.changed_lines() {
         let marker = match l.kind {
-            LineKind::Context => continue,
             LineKind::Add => b'+',
             LineKind::Del => b'-',
+            LineKind::Context => unreachable!("changed_lines excludes context lines"),
         };
         h.write_u8(marker);
         h.write(&l.text);
