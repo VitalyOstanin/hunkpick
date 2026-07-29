@@ -61,6 +61,11 @@ included or excluded.
   shifts its line numbers or staging a neighbour rewrites its surrounding context. An
   agent can capture `@<id>` once and keep using it across a staging loop. (Byte-identical
   changes share an id; `list --json` reports `id_count`. See [Content ids](#content-ids).)
+- **Correct anchors for a partial selection**: leaving a sub-hunk out changes how many
+  lines the result adds or removes, so every later hunk's new-side (`+`) start is
+  recomputed from the emitted hunks alone. `git apply` searches from that position; a
+  value carried over from the input diff would drift and, where the surrounding context
+  repeats, land the change in the wrong place.
 - **Built-in verification**: the result diff is checked for internal consistency by
   default; an optional `git apply --check` run is available on demand.
 - **Git-agnostic**: `hunkpick` reads a diff from stdin and writes to stdout. It does
@@ -370,8 +375,9 @@ only the two additions, now numbered 1 and 2.
 
 After `select` or `split`, `hunkpick` verifies the result diff for internal
 consistency: `@@` header counts match the body line counts, hunks within each file
-are ordered, and their old-file ranges do not overlap. This check runs by default and
-requires no git repository.
+are ordered, their old-file ranges do not overlap, and each hunk's new-side (`+`) start
+follows from its old-side start plus the net size of the hunks emitted before it. This
+check runs by default and requires no git repository.
 
 To disable it:
 

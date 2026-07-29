@@ -26,6 +26,17 @@ pub enum ValidationError {
         file: String,
         hunk_index: usize,
     },
+    /// A hunk whose new-side start does not follow from the old-side start plus the net size
+    /// of the hunks before it in the same file. Carries the header's value and the one the
+    /// diff implies. This is what an anchor carried over from a larger input diff looks like:
+    /// the counts and the body are consistent, yet `git apply` — which searches from the
+    /// new-side position — starts at the wrong line (see [`crate::renumber`]).
+    StaleNewStart {
+        file: String,
+        hunk_index: usize,
+        header: u32,
+        expected: u32,
+    },
 }
 
 /// Internal consistency check of a result diff. Git-agnostic, O(total lines).
@@ -37,6 +48,9 @@ pub fn validate_internal(patch: &Patch) -> Result<(), ValidationError> {
         };
         let mut prev_old_end: Option<u32> = None;
         let mut prev_new_end: Option<u32> = None;
+        // Net `added - deleted` of the hunks already seen in this file: what the new-side
+        // anchor of every later hunk is shifted by.
+        let mut delta: i64 = 0;
         for (i, h) in hunks.iter().enumerate() {
             // A text hunk with no body lines emits a `@@ -X,0 +Y,0 @@` stanza git rejects
             // as a corrupt patch. The count checks below pass it (0 == 0), so reject it here.
@@ -74,6 +88,20 @@ pub fn validate_internal(patch: &Patch) -> Result<(), ValidationError> {
                     body: ctx + add,
                 });
             }
+            // The new-side start is not an independent value: it follows from the old-side
+            // start and everything this diff already changed above. A hunk carried over from a
+            // larger diff keeps the anchor of that diff and passes every check above, so check
+            // it explicitly rather than leaving it for `git apply` to mis-locate.
+            let expected = crate::renumber::expected_new_start(h, delta);
+            if h.new_start != expected {
+                return Err(ValidationError::StaleNewStart {
+                    file: path.clone(),
+                    hunk_index: i,
+                    header: h.new_start,
+                    expected,
+                });
+            }
+            delta += i64::from(add) - i64::from(del);
             if let Some(pe) = prev_old_end {
                 if h.old_start < pe {
                     return Err(ValidationError::OverlappingHunks {
@@ -154,6 +182,60 @@ diff --git a/f b/f
         )
         .unwrap();
         assert!(validate_internal(&p).is_ok());
+    }
+
+    #[test]
+    fn stale_new_start_is_caught() {
+        // The header of a hunk taken out of a larger diff: counts and body agree, but the
+        // new-side start still describes the file the full diff produced.
+        let p = parse(
+            "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -17,3 +18,3 @@
+ q
+-r
++R
+ s
+"
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            validate_internal(&p),
+            Err(ValidationError::StaleNewStart {
+                file: "f".to_string(),
+                hunk_index: 0,
+                header: 18,
+                expected: 17,
+            })
+        );
+    }
+
+    #[test]
+    fn accumulated_offset_across_hunks_passes() {
+        // Two hunks of one diff: the first removes a line net, so the second starts one line
+        // earlier on the new side. The check must accept exactly that.
+        let p = parse(
+            "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -2,3 +2,2 @@
+ b
+-c
+ d
+@@ -17,3 +16,3 @@
+ q
+-r
++R
+ s
+"
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(validate_internal(&p), Ok(()));
     }
 
     #[test]

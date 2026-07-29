@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `select` now recomputes the new-side (`+`) start of every emitted hunk instead of
+  carrying over the value from the input diff. Leaving a sub-hunk out changes how many
+  lines the result adds or removes above each later hunk, so the inherited anchors
+  described a file the selection does not produce. `git apply` starts its search at the
+  new-side position: with a drifted anchor a selection could be rejected
+  (`patch does not apply`) or, where the surrounding context occurs more than once,
+  applied cleanly to the wrong occurrence. Selecting several sub-hunks in one invocation
+  no longer needs the `diff → stage → re-diff` loop as a workaround.
+
+### Changed
+
+- The default internal consistency check also verifies the new-side starts against the
+  accumulated `added - deleted` of the preceding hunks, reported as a `StaleNewStart`
+  error. A diff whose anchors are stale (for example, a result diff produced by an
+  earlier version) is now rejected rather than passed on to `git apply`.
+
 ## [0.6.0] - 2026-07-21
 
 ### Added

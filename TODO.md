@@ -7,6 +7,44 @@
 
 ## Fixed
 
+### `select` carried over the input diff's new-side line numbers (fixed after 0.6.0)
+
+Every kept hunk was emitted with the `new_start` it had in the input diff, where
+the sub-hunks left out were still present. Dropping a sub-hunk changes how many
+lines the result adds or removes above each later hunk, so those anchors
+described a file the selection does not produce. `git apply` starts its search at
+the new-side position, so the consequence was either a rejection
+(`patch does not apply`, reported against the *old* line number, which is the one
+that was correct) or — where the surrounding context occurs more than once — a
+clean application to the wrong occurrence. Selecting several sub-hunks in one
+invocation therefore needed the `diff → stage → re-diff` loop as a workaround.
+
+Fixed by recomputing the anchors from the result alone (`src/renumber.rs`), per
+file, before the result is emitted:
+
+```
+new_start[i] = old_start[i] + Σ (added - deleted) over the kept hunks 0..i-1
+```
+
+with a side whose line count is zero reporting the preceding line, as git writes
+it (`@@ -2,0 +3 @@`, `@@ -3 +2,0 @@`). `@L` slices are covered by the same pass:
+an unselected deletion becomes context and an unselected addition disappears,
+which changes the hunk's own `added - deleted`. The default internal consistency
+check now verifies the same relation (`StaleNewStart`), so a stale anchor is a
+hard error at emit time instead of a `git apply` surprise at the caller.
+
+Regression tests in `tests/new_side_anchors.rs`, including the case a header-only
+assertion misses: a file whose six-line block occurs twice, where the stale
+anchor applied the change cleanly to the wrong copy.
+
+The same pass also settles the earlier "`@L` across several sub-hunks in one
+invocation" item: selecting a sub-hunk's additions keeps its deletions as context
+and grows its new-side span, which with the inherited anchors made the new-side
+ranges of that piece and a later sub-hunk overlap (`OverlappingHunks`, exit 70).
+The recomputed anchors account for the growth, so the combination emits and
+applies; the remaining restriction is only on several `@L` pieces of the *same*
+sub-hunk, whose old-side ranges do coincide.
+
 ### Legacy `@lo-hi` leading slice dropped trailing context (removed in 0.5.0)
 
 Fixed by **removing** the `INDEX@lo-hi` added-line range selector entirely
@@ -53,14 +91,6 @@ same sub-hunk) as a usage error (exit 2) before the result reaches
   supported path today is the `diff → stage → re-diff` loop (one piece per round).
   Lift this only if a single-invocation multi-piece cut proves worth the anchor
   bookkeeping.
-
-- **`@L` across several sub-hunks in one invocation when deletions become
-  context.** Selecting additions (which turns that sub-hunk's deletions into
-  context) grows its new-side span; combined with another sub-hunk in the same
-  emit, the new-side ranges can overlap and `validate_internal` rejects it
-  (`OverlappingHunks`, exit 70) rather than as a clean usage error. Safe (no bad
-  patch emitted), but the diagnostic could be clearer, or the new-side anchors
-  recomputed so the combination is valid. The re-diff loop avoids it.
 
 - **Genuinely zero-context edges.** The convert-unselected-deletions-to-context
   rule removes most zero-context cases, but a context-less run (a whole-file

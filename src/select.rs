@@ -1,4 +1,5 @@
 use crate::model::*;
+use crate::renumber::renumber_new_side;
 use crate::split::auto_split_hunk;
 use crate::split::slice_changed_lines;
 use crate::subhunk_id::subhunk_hash;
@@ -322,7 +323,13 @@ pub fn select(patch: &Patch, selectors: &[Selector]) -> Result<Patch, SelectErro
     if chosen.is_empty() {
         return Err(SelectError::EmptySelection);
     }
-    emit_selection(patch, chosen, &subs_cache)
+    let mut out = emit_selection(patch, chosen, &subs_cache)?;
+    // Every emitted hunk still carries the new-side start it had in the input diff, where the
+    // hunks left out were still present. Those anchors describe a file this result does not
+    // produce, and `git apply` searches from the new-side position — recompute them from the
+    // result alone (see [`crate::renumber`]).
+    renumber_new_side(&mut out);
+    Ok(out)
 }
 
 /// Resolution phase: turn each selector into a per-file map of chosen sub-hunks, auto-splitting

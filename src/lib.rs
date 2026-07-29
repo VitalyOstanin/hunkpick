@@ -9,6 +9,7 @@
 //! - [`select`] — resolve selectors (index, range, `path:*`, content id) and emit
 //!   the chosen sub-hunks;
 //! - [`split`] — split an original hunk at context boundaries;
+//! - [`renumber`] — recompute new-side line numbers of a result diff;
 //! - [`list`] — enumerate addressable sub-hunks (human-readable and JSON);
 //! - [`validate`] — check internal consistency of a result diff;
 //! - [`subhunk_id`] — stable content ids for sub-hunks;
@@ -23,6 +24,7 @@ pub mod error;
 pub mod list;
 pub mod model;
 pub mod parser;
+pub mod renumber;
 pub mod select;
 pub mod split;
 pub mod subhunk_id;
