@@ -16,10 +16,13 @@ readme = "README.md"
 exclude = [
     ".github/",
     ".config/",
+    ".cargo/",
     "scripts/",
     "docs/",
+    "about.toml",
     "CONTRIBUTING.md",
     "CLAUDE.md",
+    "RELEASING.md",
 ]
 
 # cargo-binstall: fetch the prebuilt binary from the matching GitHub Release

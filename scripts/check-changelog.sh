@@ -5,9 +5,11 @@
 # Usage: scripts/check-changelog.sh <VERSION>     (e.g. 0.1.0, no "v" prefix)
 #
 # hunkpick's CHANGELOG follows Keep a Changelog with `## [X.Y.Z] - YYYY-MM-DD`
-# headings (ASCII hyphen separator, no `## [Unreleased]` placeholder). This
-# check only asserts that a `## [<VERSION>]` heading exists, so a tag cannot
-# ship a version that has no changelog entry. The version is matched
+# headings (ASCII hyphen separator). Work in progress collects under a
+# `## [Unreleased]` heading, which CONTRIBUTING asks contributors to fill in and
+# a release turns into the version heading. This check only asserts that a
+# `## [<VERSION>]` heading exists, so a tag cannot ship a version that has no
+# changelog entry; `Unreleased` neither satisfies nor blocks it. The version is matched
 # literally (metacharacters escaped) so "0.1.0" does not match "## [0X1X0]".
 #
 # On failure it writes a diagnostic to stderr and exits non-zero. It NEVER

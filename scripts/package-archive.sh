@@ -6,7 +6,7 @@
 #   - hunkpick-${VER}-${TARGET}.${ARCHIVE_EXT}.sha256
 #
 # The archive contains a single top-level directory matching the archive
-# stem; inside it: the binary, README.md, LICENSE.
+# stem; inside it: the binary, README.md, LICENSE, THIRD-PARTY-NOTICES.md.
 #
 # Required env:
 #   VER          version (e.g. 0.1.0)
@@ -18,6 +18,8 @@
 #   BIN_PATH     path to the prebuilt binary (default target/release/$BIN_NAME)
 #   RUNNER_TEMP  parent directory for the staging tree (default $(mktemp -d))
 #   OUTPUT_DIR   where to write the asset + .sha256 (default $PWD)
+#   NOTICES      path to the third-party notices file (default THIRD-PARTY-NOTICES.md,
+#                produced by scripts/generate-notices.sh)
 #
 # Stdout: a single line `asset=<filename>` suitable for $GITHUB_OUTPUT.
 
@@ -31,9 +33,16 @@ set -euo pipefail
 BIN_PATH=${BIN_PATH:-target/release/${BIN_NAME}}
 RUNNER_TEMP=${RUNNER_TEMP:-$(mktemp -d)}
 OUTPUT_DIR=${OUTPUT_DIR:-$PWD}
+NOTICES=${NOTICES:-THIRD-PARTY-NOTICES.md}
 
 if [ ! -f "$BIN_PATH" ]; then
   echo "error: binary not found at $BIN_PATH" >&2
+  exit 1
+fi
+# The released binary statically links third-party crates whose licenses require their
+# copyright notices to travel with it, so the notices file is mandatory, not optional.
+if [ ! -f "$NOTICES" ]; then
+  echo "error: notices file not found at $NOTICES (run scripts/generate-notices.sh)" >&2
   exit 1
 fi
 if [ ! -d "$OUTPUT_DIR" ]; then
@@ -46,12 +55,13 @@ asset="${stem}.${ARCHIVE_EXT}"
 output_path="${OUTPUT_DIR}/${asset}"
 
 # Stage the payload in a clean directory under RUNNER_TEMP so the archive
-# root is a single ${stem}/ folder containing binary + README + LICENSE.
+# root is a single ${stem}/ folder containing binary + README + LICENSE + notices.
 stage="${RUNNER_TEMP}/${stem}"
 rm -rf "$stage"
 mkdir -p "$stage"
 cp "$BIN_PATH" "${stage}/${BIN_NAME}"
 cp README.md LICENSE "$stage/"
+cp "$NOTICES" "${stage}/THIRD-PARTY-NOTICES.md"
 
 case "$ARCHIVE_EXT" in
   tar.gz)

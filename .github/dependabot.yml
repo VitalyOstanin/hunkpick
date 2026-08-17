@@ -21,6 +21,8 @@ updates:
     # dtolnay/rust-toolchain refs select a Rust toolchain, not an action
     # version: `@stable` is a rolling ref and `@1.85.0` is the intentional MSRV
     # pin. Dependabot must not "bump" either (bumping the pin to a nonexistent
-    # Rust release breaks the MSRV job on a 404).
+    # Rust release breaks the MSRV job on a 404). The flip side is that the
+    # commit SHAs behind those refs drift without notice, so they are refreshed
+    # by hand at release time (see RELEASING.md).
     ignore:
       - dependency-name: "dtolnay/rust-toolchain"

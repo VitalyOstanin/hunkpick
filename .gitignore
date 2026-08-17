@@ -1,3 +1,7 @@
 /target
 docs/superpowers/
 docs/reviews/
+docs/__check/
+docs/__explore/
+# Generated at release time by scripts/generate-notices.sh
+/THIRD-PARTY-NOTICES.md

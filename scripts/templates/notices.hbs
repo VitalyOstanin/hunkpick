@@ -1,0 +1,18 @@
+# Third-party notices
+
+`hunkpick` is distributed under the MIT license (see `LICENSE`). The released binary statically
+links the crates listed below; their license texts and copyright notices follow.
+
+{{#each licenses}}
+## {{name}}
+
+Used by:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} — {{{crate.repository}}}{{/if}}
+{{/each}}
+
+```
+{{{text}}}
+```
+
+{{/each}}
