@@ -105,11 +105,11 @@ takes seconds and stops the run before anything is compiled if the tag, `Cargo.t
 lockfile or the CHANGELOG disagree. When the pipeline finishes, check that the Release carries one
 archive plus one `.sha256` per target and that `cargo binstall hunkpick` picks up the new version.
 
-The `publish` job runs in the `crates-io` GitHub Environment. Keep `CARGO_REGISTRY_TOKEN` as a
-secret of that environment rather than of the repository, and add a required reviewer to it
-(Settings → Environments → crates-io): the pipeline then pauses before the one irreversible step,
-so a tag pushed by mistake never reaches the registry. Without those settings the environment
-exists but enforces nothing.
+There is no approval step: pushing the tag publishes, with `CARGO_REGISTRY_TOKEN` read from the
+repository secrets. That is a deliberate trade — a mistaken tag burns a version number on
+crates.io, which is cheaper here than a manual approval on every release. To change it, put the
+token in a GitHub Environment with a required reviewer and name that environment on the `publish`
+job; the run then pauses before the one irreversible step.
 
 ## If something fails
 

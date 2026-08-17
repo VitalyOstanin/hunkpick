@@ -143,10 +143,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   display-sanitised the way the human listing is, and lossy for non-UTF-8 bytes.
 - The selector index limit (2^20 per selector) is named in the error message and in the README.
 - The release pipeline checks the tag against the manifest, both lockfiles and the CHANGELOG in
-  a job of its own, before anything is built; publication runs in the `crates-io` GitHub
-  Environment, where a required reviewer can gate the irreversible step; and a release can be
-  rehearsed by running the workflow with no tag named, which reads the version from `Cargo.toml`
-  and publishes nothing.
+  a job of its own, before anything is built, and a release can be rehearsed by running the
+  workflow with no tag named, which reads the version from `Cargo.toml` and publishes nothing.
 - Behavioural decisions of this release are recorded as ADRs: `docs/ADR/0012-two-sided-diffs-only.md`
   and `docs/ADR/0013-exit-code-contract.md`.
 

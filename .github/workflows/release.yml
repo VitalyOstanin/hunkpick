@@ -198,12 +198,11 @@ jobs:
     # version reaches crates.io. Otherwise a packaging failure leaves a published version
     # whose release has no assets, and `cargo binstall hunkpick` 404s for it.
     needs: [verify-metadata, test, lint, msrv, package-binaries]
-    # The irreversible step of the pipeline runs against a GitHub Environment, which is where
-    # the crates.io token lives and where a required reviewer can be configured: a tag pushed
-    # by mistake then stops here instead of reaching the registry. Without protection rules
-    # configured the environment is inert, so this line alone changes nothing — it is the hook
-    # that makes the protection configurable at all (see RELEASING.md).
-    environment: crates-io
+    # No approval gate: a tag push publishes. A GitHub Environment with a required reviewer
+    # would pause the run before `cargo publish`, at the cost of a manual step per release;
+    # the project is small enough that a mistaken tag burning a version number is the cheaper
+    # outcome. Add `environment: <name>` here, with the token as that environment's secret,
+    # if that ever stops being true (see RELEASING.md).
     # The only jobs that need to write to the repo: `gh release create`
     # requires `contents: write`.
     permissions:
