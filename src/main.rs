@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -126,6 +126,15 @@ fn read_source(opts: &InputOpts) -> Result<Vec<u8>, AppError> {
         }
         _ => {
             let stdin = std::io::stdin();
+            // A terminal on stdin means the caller forgot the pipe (`hunkpick list` instead of
+            // `git diff | hunkpick list`). Reading on is the right behaviour — that is what a
+            // filter does, and a diff typed or pasted by hand must still work — but doing it
+            // silently is indistinguishable from a hang. One line to stderr says which it is.
+            if stdin.is_terminal() {
+                eprintln!(
+                    "hunkpick: reading a diff from the terminal; pipe one in or use -i FILE (Ctrl-D ends the input)"
+                );
+            }
             read_limited(stdin.lock(), opts.max_input_bytes)
         }
     }

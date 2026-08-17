@@ -381,10 +381,15 @@ Two cases are outside that:
 Example — split an addition-only block across two commits, one piece per round:
 
 ```sh
-git diff src/lib.rs | hunkpick list                       # the block shows +N and the [+add] marker
-git diff src/lib.rs | hunkpick select 1@L1-90   | git apply --cached && git commit -m 'feat: part one'
-git diff src/lib.rs | hunkpick select 1@L91-120 | git apply --cached && git commit -m 'feat: part two'
+git diff src/lib.rs | hunkpick list                      # the block shows +N and the [+add] marker
+git diff src/lib.rs | hunkpick select 1@L1-90 | git apply --cached && git commit -m 'feat: part one'
+git diff src/lib.rs | hunkpick select 1@L1-30 | git apply --cached && git commit -m 'feat: part two'
 ```
+
+The second round asks for `1-30`, not `91-120`: it runs a fresh `git diff`, which shows only
+the 30 lines the first round left unstaged, numbered from 1 again. Reusing the first round's
+numbers is a usage error (exit 2, "changed-line index 120 is out of range"). Selecting the
+whole remainder — `1` or `*` — works as well.
 
 A sub-hunk addressed by `@L` must be addressed **once per invocation**: combining it with
 another `@L`, or with a whole selection of the same sub-hunk, is a usage error
@@ -473,6 +478,10 @@ hunkpick list --input changes.diff
 hunkpick select 1,3 -i changes.diff | git apply --cached
 git diff | hunkpick select 1,3            # stdin (default)
 ```
+
+Run without a pipe and without `-i` and hunkpick reads the terminal, as any filter does, after
+writing one line to stderr saying so — a paste-and-Ctrl-D still works, but a forgotten pipe no
+longer looks like a hang. In a pipeline stdin is not a terminal, so nothing is printed.
 
 ### What the input may be
 

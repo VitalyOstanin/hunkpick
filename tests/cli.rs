@@ -663,3 +663,42 @@ fn a_utf16_diff_is_diagnosed_as_an_encoding_problem() {
         .code(2);
     assert.stderr(predicate::str::contains("UTF-16"));
 }
+
+/// A diff arriving through a pipe is the normal case, and it must stay quiet: the terminal hint
+/// below would otherwise land in the stderr of every scripted invocation.
+#[test]
+fn a_piped_diff_produces_no_terminal_hint() {
+    let diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n";
+
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .arg("list")
+        .write_stdin(diff)
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty());
+}
+
+/// With no pipe and no `-i`, hunkpick reads the terminal — the behaviour of any filter, and the
+/// only way a hand-pasted diff can work. Silence makes that indistinguishable from a hang: the
+/// user who typed `hunkpick list` instead of `git diff | hunkpick list` sees a dead terminal.
+/// One line to stderr names what it is waiting for.
+///
+/// Linux-only: the test needs a pty, and `script -qec CMD FILE` is the util-linux spelling.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_terminal_on_stdin_gets_a_hint() {
+    let exe = assert_cmd::cargo::cargo_bin("hunkpick");
+    let out = std::process::Command::new("script")
+        .args(["-qec", &format!("{} list", exe.display()), "/dev/null"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("util-linux script provides the pty");
+
+    let seen = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        seen.contains("reading a diff from the terminal"),
+        "the hint must reach the user before the read blocks: {seen:?}"
+    );
+}
+

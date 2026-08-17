@@ -154,3 +154,65 @@ fn a_trailing_deletion_does_not_read_as_an_overlap() {
 
     common::select_checked(&dir, &diff, &["*"]).success();
 }
+
+/// The two-round example in `select --help` has to run as written. Staging part of an
+/// addition-only block renumbers what remains — the second `git diff` sees only the lines the
+/// first round left behind — so the second round cannot reuse the first round's numbering. The
+/// help said `1@L1-90` then `1@L91-120` for a 120-line block, and the second command exited 2
+/// with "changed-line index 120 is out of range".
+///
+/// The selectors are read out of the help text rather than written here, so an edit that puts
+/// an unrunnable example back into the help fails this test instead of a user's terminal.
+#[test]
+fn the_two_round_example_in_the_help_stages_the_whole_block() {
+    let help = String::from_utf8(
+        Command::cargo_bin("hunkpick")
+            .unwrap()
+            .arg("--help")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone(),
+    )
+    .expect("help is ASCII");
+
+    // The addition-only example is the pair of `select 1@L…` lines that precede the
+    // replacement example (whose rounds both read `1@L1,2`).
+    let rounds: Vec<String> = help
+        .lines()
+        .filter(|l| l.contains("hunkpick select 1@L"))
+        .map(|l| {
+            l.split_whitespace()
+                .find(|t| t.starts_with("1@L"))
+                .expect("the line holds an @L selector")
+                .to_string()
+        })
+        .collect();
+    let block: Vec<&String> = rounds.iter().filter(|s| !s.contains(',')).collect();
+    assert_eq!(
+        block.len(),
+        2,
+        "the help documents the addition-only block as exactly two rounds: {rounds:?}"
+    );
+
+    // A new block of 120 lines appended to a committed file: one sub-hunk, 120 changed lines.
+    let dir = repo_with(&[("f", "a\n")]);
+    let mut grown = String::from("a\n");
+    for i in 1..=120 {
+        grown.push_str(&format!("line {i}\n"));
+    }
+    let diff = diff_after(&dir, &[("f", &grown)]);
+
+    let first = common::run_ok(&["select", block[0]], &diff);
+    common::apply_cached(&dir, &first);
+
+    let rest = common::git_output(&dir, &["diff"]);
+    let second = common::run_ok(&["select", block[1]], &rest);
+    common::apply_cached(&dir, &second);
+
+    assert!(
+        common::git_output(&dir, &["diff"]).is_empty(),
+        "after both documented rounds the working tree and the index agree"
+    );
+}

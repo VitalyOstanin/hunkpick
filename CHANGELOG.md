@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The two-round `@L` example in `select --help` and in the README could not be run: it reused
+  the first round's line numbers (`1@L91-120`) after a re-diff that renumbers them, so the
+  second command failed with exit 2. Both now show the corrected round and say why the numbers
+  change; an integration test drives the selectors straight out of the help text.
+
+### Changed
+
+- Reading a diff from a terminal — no pipe, no `-i` — now says so in one line on stderr before
+  it blocks. A forgotten pipe used to be indistinguishable from a hang. Nothing is printed when
+  stdin is not a terminal, so pipelines are unaffected.
 ## [0.8.0] - 2026-08-17
 
 ### Fixed

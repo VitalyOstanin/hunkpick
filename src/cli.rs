@@ -29,10 +29,11 @@ Examples:
 
   # Split a sub-hunk by individual changed lines (@L numbers the +/- lines 1..N,
   # see `list --json` changed_lines). @L keeps both leading and trailing context
-  # so every subset applies. Split an addition-only block (a new-function block)
-  # across commits, one piece per round:
+  # so every subset applies. Split an addition-only block of 120 lines across
+  # commits, one piece per round. The re-diff shows only what is left, renumbered
+  # from 1, so the second round asks for 1-30 rather than 91-120:
   git diff src/lib.rs | hunkpick select 1@L1-90 | git apply --cached
-  git diff src/lib.rs | hunkpick select 1@L91-120 | git apply --cached
+  git diff src/lib.rs | hunkpick select 1@L1-30 | git apply --cached
 
   # Separate a replacement's removals from its insertions: stage the deletions,
   # commit, then re-diff and stage the rest. The re-diff renumbers the remaining
