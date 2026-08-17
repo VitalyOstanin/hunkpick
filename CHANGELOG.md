@@ -5,6 +5,96 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Contents
+
+- [Unreleased](#unreleased)
+- [0.7.0](#070---2026-07-29)
+- [0.6.0](#060---2026-07-21)
+- [0.5.1](#051---2026-07-21)
+- [0.5.0](#050---2026-07-11)
+- [0.4.0](#040---2026-07-05)
+- [0.3.1](#031---2026-06-25)
+- [0.3.0](#030---2026-06-24)
+- [0.2.2](#022---2026-06-20)
+- [0.2.1](#021---2026-06-20)
+- [0.2.0](#020---2026-06-19)
+- [0.1.0](#010---2026-06-19)
+
+## [Unreleased]
+
+### Fixed
+
+- A context line for an empty source line is a lone space, and transports that strip
+  trailing whitespace deliver it as a zero-length line. Parsing treated that line as the
+  end of the hunk, dropped the rest of the body into the file's headers and emitted a
+  diff `git apply` rejects as garbage — with exit code 0. Such a line is now read as
+  context and emitted with its marker restored.
+- Lines that follow a hunk body — a blank separator between hunks, the `-- ` signature
+  `git format-patch` appends, a stray `Binary files ...` marker — were emitted with the
+  leading headers, which moved them above the first `@@`. They now keep their position,
+  and the binary marker is no longer dropped silently.
+- A binary file, a pure rename and a mode-only change have no `---`/`+++` lines, so they
+  had no path and could not be addressed in a multi-file diff. Their paths are now read
+  from the `diff --git` line, and `*` takes a hunkless entry whole.
+- Paths quoted and C-escaped by git (`"a/\303\251.txt"`, the `core.quotePath` default for
+  non-ASCII names) are decoded, so a selector spelled with the real file name matches.
+  The emitted diff keeps the original bytes.
+- A CRLF diff left the CR in the file path (breaking `path:` selectors) and added a stray
+  space to the hunk header, so the round-trip was not byte-identical.
+- A deleted file was listed as `/dev/null`; it is now shown under its old name.
+- Line numbers near `u32::MAX` from the input header overflowed while checking hunk
+  overlap: a debug build panicked with exit 101, a release build wrapped and decided the
+  check on a meaningless value. The bounds are computed in `u64`, and sub-hunk starts
+  saturate rather than wrap.
+- A defect of the input diff (a header that disagrees with its body, e.g. a truncated
+  diff) was reported as a verification failure of hunkpick's own result: exit code 70 and
+  a Debug dump of internal fields. It is now a usage error (exit 2) in prose, with the
+  sub-hunk numbered from one as `list` numbers it.
+- A reader that closes the pipe first (`hunkpick list | head`) ended the run with exit 74
+  and a `Broken pipe` diagnostic; it is now a normal end of work (exit 0).
+- In the `path:set` selector form a broken set was re-read together with the path, so
+  `f:2-1` was reported as `not a number: f:2` instead of `reversed range`.
+- `split` now recomputes new-side anchors like `select` does, so both commands treat a
+  diff carved out of a larger one the same way.
+- In a plain (non-git) diff a header-only entry absorbed the next file's marker lines.
+- The human listing escapes text a terminal would act on (escape sequences, control
+  bytes, bidirectional overrides) instead of passing it through.
+- A file whose name is not valid UTF-8 (legal on Unix) could not be addressed: the
+  argument was refused before hunkpick saw it. Selector paths are now taken as raw bytes,
+  so such a file is reachable by name; only the set after the `:` must be ASCII.
+
+### Changed
+
+- Auto-splitting a hunk is linear in the number of change runs; it re-counted the whole
+  prefix per sub-hunk before. On a 1.9 MB one-hunk diff with 64 000 runs `list` went from
+  3.9 s to 0.06 s.
+- `split` no longer clones the whole parsed diff to rewrite one hunk.
+- The `git apply --check` child process no longer inherits `GIT_DIR`, `GIT_WORK_TREE` and
+  related variables, so `-C DIR` alone selects the repository.
+- `--color` is described in `list --help`; the exit-code table in the README distinguishes
+  SIGINT (130) from SIGTERM (143) and documents the closed-pipe case.
+- Release archives carry `THIRD-PARTY-NOTICES.md` with the license texts of the crates
+  linked into the binary, and the release pipeline builds and verifies every archive
+  before the irreversible `cargo publish` rather than after it. The release procedure is
+  written down in `RELEASING.md`.
+- README states the measured peak memory (6x–19x the input, depending on average line
+  length) instead of "a few hundred MiB", so the input limit is not read as a RAM ceiling.
+- The crate is built on the Rust 2024 edition, formatted with the matching style edition.
+  The minimum supported Rust version is unchanged (1.85, the release that stabilised the
+  edition), so nothing is required of consumers; the dependency resolver now honours that
+  minimum when picking versions. See `docs/ADR/0011-rust-2024-edition.md`.
+
+### Changed (library API)
+
+- `Selector::File.path` is `Option<Vec<u8>>` instead of `Option<String>`, and
+  `select::parse_selectors` accepts anything convertible to `OsStr` (a `&[String]` still
+  works). This is what lets a selector name a file whose path is not valid UTF-8.
+  `select::resolve_file` takes `Option<&[u8]>` accordingly.
+- `select::build_view` returns `Vec<Vec<Hunk>>`: the position in the result is the file
+  index, so the redundant index in each tuple is gone.
+- The crate denies undocumented public items (`#![warn(missing_docs)]`); every exported
+  item now carries rustdoc.
+
 ## [0.7.0] - 2026-07-29
 
 ### Fixed

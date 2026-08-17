@@ -7,10 +7,12 @@ the project, run the checks, and submit changes.
 
 - A Rust toolchain meeting the project's minimum supported version (**1.85**). The
   [`rust-toolchain.toml`](rust-toolchain.toml) pins the components (`rustfmt`, `clippy`).
+  The MSRV check below runs on that exact version, so install it once:
+  `rustup toolchain install 1.85`.
 - `git` on `PATH`: several integration tests shell out to `git apply --check`, so they
   require a working `git` binary.
-- Optionally [`cargo-nextest`](https://nexte.st/) for a faster test run; CI uses it, but
-  `cargo test` works as well.
+- [`cargo-nextest`](https://nexte.st/): the documented way to run the tests, locally and in
+  CI. Its profile bounds per-test time and parallelism; plain `cargo test` has neither.
 
 ## Development loop
 
@@ -18,14 +20,24 @@ Run these before opening a pull request; they mirror the CI gates in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
 
 ```sh
-cargo test --all-features                                   # unit + integration + doc tests
+cargo t                                                     # unit + integration tests (nextest)
+cargo t-doc                                                 # doc tests (nextest does not run them)
 cargo clippy --all-targets --all-features -- -D warnings    # lint, warnings denied
 cargo fmt --all --check                                     # formatting (apply with `cargo fmt --all`)
 cargo +1.85 build --all-features                            # MSRV build
 ```
 
-Test runner limits (per-test timeout and thread count) live in
-[`.config/nextest.toml`](.config/nextest.toml). Keep tests fast and hermetic.
+`t` and `t-doc` are aliases defined in [`.cargo/config.toml`](.cargo/config.toml). Test runner
+limits (per-test timeout and thread count) live in
+[`.config/nextest.toml`](.config/nextest.toml), and they apply only under nextest. Without
+`cargo-nextest` installed, the fallback is `cargo test --all-features -- --test-threads=4` —
+it still has no per-test timeout, so a hung test has to be interrupted by hand. Keep tests fast
+and hermetic.
+
+## Releases
+
+Cutting a release is described in [`RELEASING.md`](RELEASING.md): what the pipeline checks,
+how to prepare the release commit, and how to rehearse it with a dry run.
 
 ## Pull requests
 
@@ -35,6 +47,12 @@ Test runner limits (per-test timeout and thread count) live in
   test that exercises it, and where applicable a `git apply --check` round-trip.
 - Update [`CHANGELOG.md`](CHANGELOG.md) under an `Unreleased` section when your change is
   user-visible (new flag, changed output, bug fix).
+- Adding or removing a dependency changes the third-party notices shipped in release
+  archives. They are generated at release time by
+  [`scripts/generate-notices.sh`](scripts/generate-notices.sh) (needs
+  [`cargo-about`](https://github.com/EmbarkStudios/cargo-about)); if the new crate's license is
+  not in the `accepted` list of [`about.toml`](about.toml), generation fails — review the
+  license before adding it there.
 - Update the [README](README.md) and, for design decisions, add an
   [ADR](docs/ADR/README.md) when the change alters externally observable behaviour or a
   core invariant.
@@ -44,6 +62,10 @@ Test runner limits (per-test timeout and thread count) live in
 Use [Conventional Commits](https://www.conventionalcommits.org/) (`fix:`, `feat:`,
 `refactor:`, `docs:`, `ci:`, `test:`, `chore:`). Write messages in English, imperative
 mood, with a body explaining the why when it is not obvious from the subject.
+
+The release commit has one fixed spelling: `chore(release): X.Y.Z` (see
+[`RELEASING.md`](RELEASING.md)). Earlier releases used `chore: release X.Y.Z (vX.Y.Z)`; that
+form is retired, so the history reads uniformly from 0.6.0 onwards.
 
 ## Reporting issues
 

@@ -149,7 +149,21 @@ src/main.rs
 ```
 
 The 16-hex token after the index is the sub-hunk's **content id** (see
-[Selectors](#selectors)).
+[Selectors](#selectors)). Each line then shows the hunk header, the `+N -M` change
+counts, and a preview of the first changed line. A sub-hunk that only adds lines (a
+file creation or a pure append, with no context and no deletions) is flagged `[+add]`
+between the counts and the preview — the same property the JSON listing reports as
+`addition_only`:
+
+```
+src/new_file.rs
+  [1] 3f1c0a52d7b94e68 @@ -0,0 +1,12 @@  +12 -0 [+add]  +fn main() {
+```
+
+Text a terminal would act on rather than show — escape sequences, control bytes,
+bidirectional overrides — is escaped in this listing (`\x1b`, `\u{202e}`), so a diff
+being filtered cannot repaint or reorder what you are reading. The JSON listing carries
+the text as-is (JSON escapes control characters itself).
 
 **JSON schema** (`--json`): array of file objects, each with `path`, `binary`, and
 `hunks` (array of sub-hunk objects with `index`, `id`, `id_count`, `old_start`,
@@ -274,6 +288,12 @@ Multiple selectors can be combined: `hunkpick select src/a.rs:1 src/b.rs:2,3`.
 Path matching checks both the old and new path of a file diff entry. A bare index
 list or `*` (no `path:` prefix) is accepted only when the diff contains exactly one
 file; otherwise `hunkpick` exits with code 2.
+
+The path part of a selector is compared as raw bytes, so a file whose name is not valid
+UTF-8 (legal on Unix) stays addressable — pass the name exactly as the shell holds it. Only
+the set after the `:` has to be ASCII. Git's `core.quotePath` (on by default) writes such
+names quoted and C-escaped in the diff; hunkpick decodes them, so the selector always spells
+the real name, not the escaped form.
 
 Selectors are matched in order of precedence: a `path:set` form is recognised first
 (so a file literally named `@foo` is still addressable as `@foo:1`), then `@id`, then
@@ -426,6 +446,20 @@ Input (from stdin or a file) is capped at **64 MiB** by default to guard against
 accidentally unbounded stream. Exceeding the limit is a usage error (exit code 2).
 Override with `--max-input-bytes N`; `0` disables the limit.
 
+The limit bounds the input, not the memory: hunkpick keeps the whole parsed diff in memory
+with one allocation per line, so peak RSS is a multiple of the input size, and the multiple
+grows as the average line gets shorter. Measured on a release build (`/usr/bin/time -f %M`):
+
+| Input                          | `select '*'` | `list --json` |
+|--------------------------------|-------------:|--------------:|
+| 18 MB, lines of ~13 bytes      |    196 MiB   |      349 MiB  |
+| 61 MiB, lines of ~60 bytes     |    341 MiB   |      534 MiB  |
+| 63 MiB (at the limit), ~40 B   |    427 MiB   |      713 MiB  |
+
+That is 6x–19x the input, and the run at the default limit takes well under a second
+(0.49 s and 0.88 s for the row above). Plan for around a gigabyte when the lines are short,
+and raise `--max-input-bytes` only with that in mind.
+
 ```sh
 hunkpick list --max-input-bytes 268435456 -i huge.diff   # raise to 256 MiB
 hunkpick list --max-input-bytes 0 -i huge.diff           # no limit
@@ -476,7 +510,11 @@ original (one hunk becomes several), but the applied result is the same.
 |    2 | Usage error: bad flag, bad selector, parse error, binary/non-diff input, input over size limit |
 |   70 | Verification failure (internal consistency or `git apply --check`) |
 |   74 | I/O error (reading stdin or writing stdout)                    |
-|  130 | Interrupted (SIGINT or SIGTERM, default signal disposition)    |
+|  130 | Interrupted by SIGINT (default signal disposition: 128 + 2)     |
+|  143 | Terminated by SIGTERM (default signal disposition: 128 + 15)    |
+
+A reader that closes the pipe first (`hunkpick list | head`) is not an error: the write
+ends the run with code 0, so the tool composes with `set -o pipefail`.
 
 ## Comparison to filterdiff
 
@@ -498,8 +536,11 @@ Contributions are welcome. The crate has no build-time code generation and no ex
 runtime dependencies, so the standard cargo workflow applies.
 
 ```sh
-# Run the full test suite (unit + integration + doc tests).
-cargo test --all-features
+# Run the unit and integration tests through nextest (the documented runner).
+cargo t
+
+# Run the doc tests; nextest does not execute them.
+cargo t-doc
 
 # Lint with all warnings denied (the CI gate).
 cargo clippy --all-targets --all-features -- -D warnings
@@ -511,12 +552,21 @@ cargo fmt --all --check
 cargo +1.85 build --all-features
 ```
 
-The CI workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same
-checks, using [`cargo-nextest`](https://nexte.st/) for the unit/integration tests and
-`cargo test --doc` for doc tests. Test runner limits (per-test timeout and thread count)
-live in [`.config/nextest.toml`](.config/nextest.toml); please keep tests fast and
+`t` and `t-doc` are aliases from [`.cargo/config.toml`](https://github.com/VitalyOstanin/hunkpick/blob/master/.cargo/config.toml); the CI workflow
+([`.github/workflows/ci.yml`](https://github.com/VitalyOstanin/hunkpick/blob/master/.github/workflows/ci.yml)) runs the same checks with
+[`cargo-nextest`](https://nexte.st/) for the unit/integration tests and `cargo test --doc` for
+doc tests. Test runner limits (per-test timeout and thread count) live in
+[`.config/nextest.toml`](https://github.com/VitalyOstanin/hunkpick/blob/master/.config/nextest.toml) and apply only under nextest; without it
+installed, use `cargo test --all-features -- --test-threads=4`. Please keep tests fast and
 hermetic — several tests shell out to `git apply --check` and require `git` on `PATH`.
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+The released binary statically links third-party crates (all MIT / Apache-2.0 / Unicode-3.0).
+Their license texts and copyright notices ship inside every release archive as
+`THIRD-PARTY-NOTICES.md`, generated at release time by
+[`scripts/generate-notices.sh`](https://github.com/VitalyOstanin/hunkpick/blob/master/scripts/generate-notices.sh) from
+[`about.toml`](https://github.com/VitalyOstanin/hunkpick/blob/master/about.toml). Installing from crates.io needs no such file — cargo resolves the
+dependencies' own licenses from `Cargo.lock`.

@@ -16,8 +16,10 @@ library (`src/lib.rs`) and a binary (`src/main.rs`).
 
 ## Development loop
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). In short: `cargo test --all-features`,
-`cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt --all --check`.
+See [CONTRIBUTING.md](CONTRIBUTING.md). In short: `cargo t` (nextest; `cargo t-doc` for the
+doc tests), `cargo clippy --all-targets --all-features -- -D warnings`,
+`cargo fmt --all --check`. Run the tests through nextest — the limits in
+`.config/nextest.toml` (per-test timeout, thread count) do not apply to plain `cargo test`.
 Some integration tests require `git` on `PATH`.
 
 ## Project decisions
