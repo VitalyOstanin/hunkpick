@@ -1,7 +1,7 @@
 use crate::model::*;
 use std::fmt;
 
-/// Why an input diff could not be parsed. Both variants are usage errors (exit code 2).
+/// Why an input diff could not be parsed. Every variant is a usage error (exit code 2).
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseError {
     /// A `@@` line does not match `@@ -os,ol +ns,nl @@`. Carries the line.
@@ -9,6 +9,10 @@ pub enum ParseError {
     /// Diff content that cannot occur in a well-formed diff (e.g. a hunk inside a binary
     /// file entry). Carries a description.
     Unexpected(String),
+    /// The input is a combined diff — the n-way format git writes for a merge (`diff --cc`,
+    /// `@@@` headers). Its body carries one marker column per parent, so it is not a two-sided
+    /// unified diff and cannot be addressed or sliced. Carries the line that revealed it.
+    Combined(String),
 }
 
 impl fmt::Display for ParseError {
@@ -16,6 +20,11 @@ impl fmt::Display for ParseError {
         match self {
             ParseError::BadHunkHeader(s) => write!(f, "malformed hunk header: {s}"),
             ParseError::Unexpected(s) => write!(f, "unexpected diff content: {s}"),
+            ParseError::Combined(s) => write!(
+                f,
+                "combined (merge) diff is not supported, hunkpick reads two-sided \
+                 unified diffs: {s}"
+            ),
         }
     }
 }
@@ -67,6 +76,7 @@ struct FileState {
 /// input, and paths as raw bytes.
 pub fn parse(input: &[u8]) -> Result<Patch, ParseError> {
     let mut files: Vec<FileDiff> = Vec::new();
+    let mut preamble: Vec<Vec<u8>> = Vec::new();
     let mut cur: Option<FileDiff> = None;
     let mut st = FileState::default();
 
@@ -75,6 +85,16 @@ pub fn parse(input: &[u8]) -> Result<Patch, ParseError> {
         let is_last_empty = line.is_empty() && lines.peek().is_none();
         if is_last_empty {
             break;
+        }
+
+        // Checked before anything else claims the line: an unrecognised `@@@` header would
+        // otherwise be filed as a header and its body read as loose text, silently truncating
+        // the hunk and inventing a file entry out of a `--- removed in both parents` line.
+        // Only outside a hunk body, where a leading marker keeps these prefixes unreachable.
+        if !st.in_hunk && is_combined_marker(line) {
+            return Err(ParseError::Combined(
+                String::from_utf8_lossy(line).into_owned(),
+            ));
         }
 
         if let Some(rest) = line.strip_prefix(b"diff --git ") {
@@ -95,7 +115,11 @@ pub fn parse(input: &[u8]) -> Result<Patch, ParseError> {
         }
 
         let Some(f) = cur.as_mut() else {
-            continue; // preamble before any file
+            // Before the first file entry: the mail head of a format-patch, or any other
+            // preamble. Kept in place so the output is the input plus the selection, not a
+            // patch that lost its head while keeping its footer.
+            preamble.push(line.to_vec());
+            continue;
         };
 
         if line.starts_with(b"@@ ") {
@@ -126,7 +150,13 @@ pub fn parse(input: &[u8]) -> Result<Patch, ParseError> {
     if let Some(f) = cur.take() {
         files.push(f);
     }
-    Ok(Patch { files })
+    Ok(Patch {
+        preamble,
+        files,
+        // `split` yields a trailing empty element exactly when the input ends with a newline,
+        // and the loop above skips it; a non-empty final element means the newline was absent.
+        no_trailing_newline: !input.is_empty() && !input.ends_with(b"\n"),
+    })
 }
 
 /// Start a hunk from its `@@` header: record the declared counts and open the body.
@@ -155,6 +185,15 @@ fn new_file(headers: Vec<Vec<u8>>) -> FileDiff {
         new_path: None,
         content: FileContent::Text(Vec::new()),
     }
+}
+
+/// Whether the line marks a combined diff: the header git writes for a merge (`diff --cc`,
+/// `diff --combined`) or its hunk header, which has one `@` per side plus one (`@@@ -1,3 -1,3
+/// +1,3 @@@` for two parents).
+fn is_combined_marker(line: &[u8]) -> bool {
+    line.starts_with(b"diff --cc ")
+        || line.starts_with(b"diff --combined ")
+        || line.starts_with(b"@@@")
 }
 
 /// Open a file entry from a `diff --git a/x b/y` line. The paths are seeded from the command
@@ -214,9 +253,15 @@ fn take_body_line(h: &mut Hunk, line: &[u8], rem: &mut Remaining) -> BodyLine {
             rem.old -= 1;
         }
         _ if line.starts_with(b"\\ ") => {
-            if let Some(last) = h.lines.last_mut() {
-                last.no_newline = true;
-            }
+            // The marker qualifies the line before it, so one before any body line does not
+            // belong to this hunk. Report the hunk as ended and let the line be recorded where
+            // it stands: dropping it would emit a diff that differs from its input.
+            let Some(last) = h.lines.last_mut() else {
+                return BodyLine::HunkEnded;
+            };
+            // Verbatim: in a CRLF diff the marker arrives with its CR, and emitting it with a
+            // bare newline would leave the output with mixed line endings.
+            last.no_newline = Some(line.to_vec());
         }
         _ => return BodyLine::HunkEnded,
     }
@@ -235,7 +280,7 @@ fn mk_line(kind: LineKind, text: &[u8]) -> Line {
     Line {
         kind,
         text: text.to_vec(),
-        no_newline: false,
+        no_newline: None,
     }
 }
 
@@ -243,19 +288,27 @@ fn mk_line(kind: LineKind, text: &[u8]) -> Line {
 /// after them (`trailer`, tagged with how many hunks precede it), not with the leading
 /// `headers` — emitting it up front reorders the diff and `git apply` rejects the result.
 fn push_header(f: &mut FileDiff, line: &[u8]) {
+    // Once the entry is binary, every further line of it belongs to the payload. `git diff
+    // --binary` writes `literal <n>`, base85 lines and blank separators after the marker, and
+    // none of them look like a marker; treating them as leading headers puts them above the
+    // marker on the way out, which git rejects as garbage.
+    if let FileContent::Binary(b) = &mut f.content {
+        b.push(line.to_vec());
+        return;
+    }
     let hunks_so_far = match &f.content {
         FileContent::Text(h) => h.len(),
         FileContent::Binary(_) => 0,
     };
-    if line.starts_with(b"Binary files ") || line == b"GIT binary patch" {
+    if is_binary_marker(line) {
         match &mut f.content {
-            FileContent::Binary(b) => b.push(line.to_vec()),
             FileContent::Text(h) if h.is_empty() => {
                 f.content = FileContent::Binary(vec![line.to_vec()]);
             }
             // A binary marker after hunks is not a valid combination, but the line is still
             // part of the input and is kept in place rather than dropped.
             FileContent::Text(_) => f.trailer.push((hunks_so_far, line.to_vec())),
+            FileContent::Binary(_) => unreachable!("handled above"),
         }
         return;
     }
@@ -269,6 +322,14 @@ fn push_header(f: &mut FileDiff, line: &[u8]) {
         f.new_path = Some(strip_ab(rest));
     }
     f.headers.push(line.to_vec());
+}
+
+/// Whether a line announces binary content: either git's summary form (`Binary files ... differ`)
+/// or the header of a full binary patch. The trailing CR of a CRLF diff is not part of the
+/// marker — without stripping it the marker goes unrecognised and the payload is read as text.
+fn is_binary_marker(line: &[u8]) -> bool {
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    line.starts_with(b"Binary files ") || line == b"GIT binary patch"
 }
 
 /// Decode a path as written after `--- `/`+++ ` or on a `diff --git` line: undo git's quoting
@@ -421,6 +482,7 @@ fn parse_range(s: &str) -> Result<(u32, u32), ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::emit::emit;
     use crate::model::{FileContent, LineKind};
 
     const ONE: &str = "\
@@ -519,8 +581,8 @@ diff --git a/f b/f
         let FileContent::Text(h) = &p.files[0].content else {
             panic!()
         };
-        assert!(h[0].lines[0].no_newline);
-        assert!(h[0].lines[1].no_newline);
+        assert!(h[0].lines[0].no_newline.is_some());
+        assert!(h[0].lines[1].no_newline.is_some());
     }
 
     #[test]
@@ -641,6 +703,69 @@ Binary files a/f and b/f differ
             p.files[0].trailer,
             vec![(1usize, b"Binary files a/f and b/f differ".to_vec())]
         );
+    }
+
+    #[test]
+    fn a_format_patch_mail_header_survives_the_round_trip() {
+        // `git format-patch` wraps the diff in a mail: headers, the commit message and a
+        // diffstat come before the first `diff --git`, the `-- ` signature after the last hunk.
+        // Keeping the signature while dropping the head would leave a patch `git am` no longer
+        // accepts, with the mail's footer still attached.
+        let src = concat!(
+            "From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n",
+            "From: Someone <someone@example.invalid>\n",
+            "Subject: [PATCH] change f\n",
+            "\n",
+            " f | 2 +-\n",
+            " 1 file changed, 1 insertion(+), 1 deletion(-)\n",
+            "\n",
+            "diff --git a/f b/f\n",
+            "--- a/f\n",
+            "+++ b/f\n",
+            "@@ -1 +1 @@\n",
+            "-a\n",
+            "+A\n",
+            "-- \n",
+            "2.53.0\n",
+        );
+        let p = parse(src.as_bytes()).unwrap();
+        assert_eq!(emit(&p), src.as_bytes());
+    }
+
+    #[test]
+    fn a_no_newline_marker_before_any_body_line_is_kept() {
+        // The marker belongs to the line before it, so a body that starts with one is
+        // malformed. Swallowing the line would emit a diff that differs from its input with
+        // exit code 0; it stays where it was, and the empty hunk is what the input check
+        // reports.
+        let src = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1 +1 @@
+\\ No newline at end of file
+";
+        let p = parse(src.as_bytes()).unwrap();
+        assert_eq!(emit(&p), src.as_bytes(), "no byte may be dropped");
+    }
+
+    #[test]
+    fn crlf_binary_marker_still_starts_a_binary_entry() {
+        // The CR belongs to the line ending, not to the marker. Missing that reads the payload
+        // as text and reorders it on the way out.
+        let src = "\
+diff --git a/f.bin b/f.bin\r
+index 34b631e..f0c6ea3 100644\r
+GIT binary patch\r
+literal 13\r
+UcmeAS@N;M2<Y3P)$w(~%02liMsQ>@~\r
+";
+        let p = parse(src.as_bytes()).unwrap();
+        let FileContent::Binary(b) = &p.files[0].content else {
+            panic!("a CRLF binary marker must start a binary entry");
+        };
+        assert_eq!(b.len(), 3, "marker and payload belong to the entry");
+        assert_eq!(emit(&p), src.as_bytes(), "and come back unchanged");
     }
 
     #[test]

@@ -210,3 +210,27 @@ fn git_check_ignores_inherited_git_dir() {
         .assert()
         .success();
 }
+
+/// A diff whose last sub-hunk deletes the tail of the file: the deletion carries no new-side
+/// lines, so its header number is the last line the previous sub-hunk produced. Comparing the
+/// raw header numbers reads that as an overlap and rejects a diff git itself writes, so this
+/// pins that `select '*'` emits it and that git applies the result.
+#[test]
+fn a_trailing_deletion_does_not_read_as_an_overlap() {
+    let dir = repo_with(&[("f", "a\nb\nc\nd\ne\n")]);
+    let diff = diff_after(&dir, &[("f", "a\nc\n")]);
+    revert(&dir);
+
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args([
+            "select",
+            "*",
+            "--verify-result-diff-git",
+            "-C",
+            dir.path().to_str().unwrap(),
+        ])
+        .write_stdin(diff)
+        .assert()
+        .success();
+}

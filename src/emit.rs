@@ -1,9 +1,15 @@
 use crate::model::*;
 
-/// Render `patch` back to a unified diff. Round-trips a git-canonical diff byte for byte:
-/// header lines, hunk bodies, trailing lines after a hunk and CRLF endings are all preserved.
+/// Render `patch` back to a unified diff. Round-trips its input byte for byte — not just a
+/// git-canonical diff: the preamble before the first entry, header lines, hunk bodies, lines
+/// trailing a hunk, CRLF endings, the `\ No newline at end of file` marker with the ending it
+/// came with, and a missing final newline are all preserved.
 pub fn emit(patch: &Patch) -> Vec<u8> {
     let mut out = Vec::with_capacity(emitted_size_hint(patch));
+    for l in &patch.preamble {
+        out.extend_from_slice(l);
+        out.push(b'\n');
+    }
     for f in &patch.files {
         for h in &f.headers {
             out.extend_from_slice(h);
@@ -36,6 +42,11 @@ pub fn emit(patch: &Patch) -> Vec<u8> {
             }
         }
     }
+    // Every line is written with its newline; drop the last one when the input had none, so a
+    // diff that arrived without a final newline leaves unchanged.
+    if patch.no_trailing_newline && out.last() == Some(&b'\n') {
+        out.pop();
+    }
     out
 }
 
@@ -46,10 +57,7 @@ pub fn emit(patch: &Patch) -> Vec<u8> {
 fn emitted_size_hint(patch: &Patch) -> usize {
     /// Allowance per `@@ -X,Y +Z,W @@` header: the punctuation plus room for four numbers.
     const HUNK_HEADER: usize = 40;
-    /// `\ No newline at end of file` plus its newline.
-    const NO_NEWLINE: usize = 28;
-
-    let mut n = 0;
+    let mut n = patch.preamble.iter().map(|l| l.len() + 1).sum::<usize>();
     for f in &patch.files {
         n += f.headers.iter().map(|h| h.len() + 1).sum::<usize>();
         n += f.trailer.iter().map(|(_, l)| l.len() + 1).sum::<usize>();
@@ -59,8 +67,8 @@ fn emitted_size_hint(patch: &Patch) -> usize {
                 for h in hunks {
                     n += HUNK_HEADER + h.section.len();
                     for l in &h.lines {
-                        // marker + text + newline, and the no-newline note when flagged
-                        n += l.text.len() + 2 + if l.no_newline { NO_NEWLINE } else { 0 };
+                        // marker + text + newline, and the no-newline note when present
+                        n += l.text.len() + 2 + l.no_newline.as_ref().map_or(0, |m| m.len() + 1);
                     }
                 }
             }
@@ -79,22 +87,24 @@ fn emit_trailer(out: &mut Vec<u8>, f: &FileDiff, at: usize) {
     }
 }
 
+/// The section text a hunk header carries, without the CR a CRLF diff leaves at the end: that
+/// CR is the line ending, not a section. A header with nothing else gets no separating space
+/// when emitted and no section in the listing — both callers ask this one question, so they
+/// cannot drift apart.
+pub(crate) fn section_text(h: &Hunk) -> &[u8] {
+    h.section.strip_suffix(b"\r").unwrap_or(&h.section)
+}
+
 fn emit_hunk(out: &mut Vec<u8>, h: &Hunk) {
     out.extend_from_slice(b"@@ -");
     out.extend_from_slice(fmt_range(h.old_start, h.old_lines).as_bytes());
     out.extend_from_slice(b" +");
     out.extend_from_slice(fmt_range(h.new_start, h.new_lines).as_bytes());
     out.extend_from_slice(b" @@");
-    // The section text is separated by a space, but a CRLF diff leaves a bare CR here: that
-    // is the line ending, not a section, and prefixing it with a space would alter the header.
-    if !h
-        .section
-        .strip_suffix(b"\r")
-        .unwrap_or(&h.section)
-        .is_empty()
-    {
+    if !section_text(h).is_empty() {
         out.push(b' ');
     }
+    // The raw section, CR and all: what came in is what goes out.
     out.extend_from_slice(&h.section);
     out.push(b'\n');
     for l in &h.lines {
@@ -105,8 +115,10 @@ fn emit_hunk(out: &mut Vec<u8>, h: &Hunk) {
         });
         out.extend_from_slice(&l.text);
         out.push(b'\n');
-        if l.no_newline {
-            out.extend_from_slice(b"\\ No newline at end of file\n");
+        if let Some(marker) = &l.no_newline {
+            // Verbatim, so a CRLF diff keeps the CR the marker arrived with.
+            out.extend_from_slice(marker);
+            out.push(b'\n');
         }
     }
 }
@@ -146,6 +158,24 @@ index 111..222 100644
  c
 ",
         );
+    }
+
+    /// The marker line has a line ending like every other line: in a CRLF diff it arrives as
+    /// `\ No newline at end of file\r\n`. Rendering it with a bare `\n` leaves the output with
+    /// mixed line endings and breaks the byte-for-byte round-trip this module promises.
+    #[test]
+    fn roundtrips_the_no_newline_marker_of_a_crlf_diff() {
+        roundtrip(
+            "--- a/f\r\n+++ b/f\r\n@@ -1 +1 @@\r\n-a\r\n\
+             \\ No newline at end of file\r\n+b\r\n\\ No newline at end of file\r\n",
+        );
+    }
+
+    /// A diff pasted or piped without its final newline is still that diff; adding one makes
+    /// the output differ from the input by a byte, which the round-trip promise does not allow.
+    #[test]
+    fn roundtrips_an_input_without_a_trailing_newline() {
+        roundtrip("--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b");
     }
 
     #[test]

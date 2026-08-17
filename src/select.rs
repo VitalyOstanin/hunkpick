@@ -540,6 +540,36 @@ fn reject_conflicting_line_set_picks(picks: &[Chosen]) -> Result<(), SelectError
     Ok(())
 }
 
+/// A whole-file deletion has nothing to select from: every line of it is a deletion, so an `@L`
+/// slice keeps the unselected ones as context and the result declares a file removed while its
+/// body still lists lines. `git apply` rejects that with `deleted file <path> still has
+/// contents`, and the internal check cannot see it — it compares counts, order and anchors, not
+/// the headers against the body. Selecting every changed line is fine: no context survives, and
+/// the result is the deletion itself.
+fn reject_partial_selection_of_a_deleted_file(
+    f: &FileDiff,
+    hunks: &[Hunk],
+) -> Result<(), SelectError> {
+    let declares_deletion = f.new_path.as_deref() == Some(b"/dev/null".as_slice())
+        || f.headers
+            .iter()
+            .any(|h| h.starts_with(b"deleted file mode"));
+    if !declares_deletion {
+        return Ok(());
+    }
+    if hunks
+        .iter()
+        .any(|h| h.lines.iter().any(|l| l.kind == LineKind::Context))
+    {
+        return Err(SelectError::LineSelect(format!(
+            "{}: the entry deletes the file as a whole, so a partial @L selection cannot be \
+             expressed as one diff; select the sub-hunk whole, or stage the removal on its own",
+            String::from_utf8_lossy(f.old_path.as_deref().unwrap_or(b"?"))
+        )));
+    }
+    Ok(())
+}
+
 /// Turn ordered, deduplicated picks into the hunks of one file: a whole pick clones its
 /// sub-hunk, an `@L` pick cuts it down to the selected changed lines.
 fn materialise_picks(subs: &[Hunk], picks: &[Chosen]) -> Result<Vec<Hunk>, SelectError> {
@@ -583,7 +613,9 @@ fn emit_selection(
                 picks.dedup_by(
                     |a, b| matches!((a, b), (Chosen::Whole(x), Chosen::Whole(y)) if x == y),
                 );
-                FileContent::Text(materialise_picks(&subs_cache[&fi], &picks)?)
+                let hunks = materialise_picks(&subs_cache[&fi], &picks)?;
+                reject_partial_selection_of_a_deleted_file(src, &hunks)?;
+                FileContent::Text(hunks)
             }
         };
         // Only the file's tail (lines after its last hunk, e.g. the `-- \n<version>` signature
@@ -612,7 +644,14 @@ fn emit_selection(
             content,
         });
     }
-    Ok(Patch { files })
+    // The preamble carries over with the files: a format-patch input stays a mail, head and
+    // footer both. Its diffstat then describes the original commit rather than the selection —
+    // the caller chose to filter a mail, and hunkpick does not rewrite prose.
+    Ok(Patch {
+        preamble: patch.preamble.clone(),
+        files,
+        no_trailing_newline: patch.no_trailing_newline,
+    })
 }
 
 /// Resolve an `@<id>` selector: match every sub-hunk in the patch whose content hash equals
@@ -765,7 +804,7 @@ diff --git a/f b/f
                 .map(|&(kind, text)| Line {
                     kind,
                     text: text.as_bytes().to_vec(),
-                    no_newline: false,
+                    no_newline: None,
                 })
                 .collect(),
         }

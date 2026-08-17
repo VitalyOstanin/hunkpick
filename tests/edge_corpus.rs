@@ -547,3 +547,117 @@ fn path_with_invalid_utf8_is_addressable() {
         "the addressed change is emitted"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Full binary patch
+// ---------------------------------------------------------------------------
+
+/// `git diff --binary` writes the payload itself — `literal <n>`, base85 lines, blank
+/// separators — after the `GIT binary patch` marker. Those lines carry no marker of their own,
+/// so an entry that has already turned binary must keep taking them; otherwise they land in the
+/// leading headers and come out above the marker, which git rejects as garbage. This is the
+/// form `git apply --cached` needs to stage a binary change, so it has to survive intact.
+#[test]
+fn full_binary_patch_comes_out_byte_for_byte() {
+    let dir = common::repo_with(&[]);
+    std::fs::write(dir.path().join("img.bin"), b"\x00\x01\x02one").unwrap();
+    common::sys(&dir, &["add", "img.bin"]);
+    common::sys(&dir, &["commit", "-q", "-m", "add binary"]);
+    std::fs::write(dir.path().join("img.bin"), b"\x00\x01\x02two-x").unwrap();
+
+    let diff = common::git_output_bytes(&dir, &["diff", "--binary"]);
+    assert!(
+        diff.windows(16).any(|w| w == b"GIT binary patch"),
+        "the fixture must be a full binary patch"
+    );
+    common::revert(&dir);
+
+    let out = Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args([
+            "select",
+            "img.bin:*",
+            "--verify-result-diff-git",
+            "-C",
+            dir.path().to_str().unwrap(),
+        ])
+        .write_stdin(diff.clone())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&diff),
+        "a binary entry must be emitted whole and unchanged"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Partial @L on a deleted file
+// ---------------------------------------------------------------------------
+
+/// An entry that declares the file removed (`deleted file mode`, `+++ /dev/null`) has no room
+/// for a partial selection: `@L` keeps the unselected deletions as context, so the header asks
+/// git to delete a file whose body still has lines and git refuses
+/// (`deleted file f still has contents`). Better a usage error than a diff that cannot apply.
+#[test]
+fn a_partial_line_set_on_a_deleted_file_is_a_usage_error() {
+    let dir = common::repo_with(&[("f", "l1\nl2\nl3\nl4\nl5\n")]);
+    common::sys(&dir, &["rm", "-q", "f"]);
+    let diff = common::diff_staged(&dir);
+    assert!(
+        diff.contains("deleted file mode"),
+        "the fixture must be a whole-file deletion: {diff}"
+    );
+
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "1@L1,2"])
+        .write_stdin(diff.clone())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("deletes the file as a whole"));
+
+    // Naming the sub-hunk whole still works: that is the file's removal, unchanged.
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "1"])
+        .write_stdin(diff)
+        .assert()
+        .success();
+}
+
+// ---------------------------------------------------------------------------
+// Combined (merge) diff
+// ---------------------------------------------------------------------------
+
+/// A combined diff — what `git show` writes for a merge commit — has one marker column per
+/// parent and `@@@` headers. Read as a two-sided diff it loses data quietly: the body is
+/// truncated at the first line and a `--- removed in both parents` line invents a file entry.
+/// hunkpick does not address that format, so it says so instead.
+#[test]
+fn a_combined_diff_is_rejected_as_a_usage_error() {
+    let diff = concat!(
+        "diff --cc f\n",
+        "index 1111111,2222222..3333333\n",
+        "--- a/f\n",
+        "+++ b/f\n",
+        "@@@ -1,3 -1,3 +1,3 @@@\n",
+        "  ctx\n",
+        "--- removed in both\n",
+        "++ added\n",
+    );
+
+    for args in [vec!["list"], vec!["select", "f:*"]] {
+        Command::cargo_bin("hunkpick")
+            .unwrap()
+            .args(&args)
+            .write_stdin(diff)
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("combined"));
+    }
+}

@@ -1,4 +1,4 @@
-use crate::emit::fmt_range;
+use crate::emit::{fmt_range, section_text};
 use crate::model::*;
 use crate::select::build_view;
 use crate::subhunk_id::{format_id, subhunk_hash, subhunk_id};
@@ -68,9 +68,10 @@ fn header_string(h: &Hunk) -> String {
     let old = fmt_range(h.old_start, h.old_lines);
     let new = fmt_range(h.new_start, h.new_lines);
     let mut s = format!("@@ -{old} +{new} @@");
-    if !h.section.is_empty() {
+    let section = section_text(h);
+    if !section.is_empty() {
         s.push(' ');
-        s.push_str(&String::from_utf8_lossy(&h.section));
+        s.push_str(&String::from_utf8_lossy(section));
     }
     s
 }
@@ -235,6 +236,17 @@ mod tests {
     use super::*;
     use crate::parser::parse;
     use crate::select::build_view;
+
+    /// In a CRLF diff the header's trailing CR is the line ending, not section text. `emit`
+    /// already knows that; the listing must agree, or it prints a separating space and a raw
+    /// control byte — inside a JSON string field that consumers parse.
+    #[test]
+    fn crlf_header_carries_no_section_in_the_listing() {
+        let src = "--- a/f\r\n+++ b/f\r\n@@ -1,3 +1,3 @@\r\n a\r\n-b\r\n+B\r\n c\r\n";
+        let p = parse(src.as_bytes()).unwrap();
+        let view = build_view(&p);
+        assert_eq!(header_string(&view[0][0]), "@@ -1,3 +1,3 @@");
+    }
 
     #[test]
     fn human_escapes_terminal_control_sequences() {

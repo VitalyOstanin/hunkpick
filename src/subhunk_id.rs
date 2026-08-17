@@ -47,7 +47,7 @@ fn feed(h: &mut Fnv1a, file: &FileDiff, sub: &Hunk) {
         h.write_u8(marker);
         h.write(&l.text);
         h.write_u8(0);
-        h.write_u8(l.no_newline as u8);
+        h.write_u8(l.no_newline.is_some() as u8);
     }
 }
 
@@ -83,7 +83,7 @@ mod tests {
         Line {
             kind,
             text: text.as_bytes().to_vec(),
-            no_newline: false,
+            no_newline: None,
         }
     }
 
@@ -208,7 +208,7 @@ mod tests {
         let f = file("src/a.rs");
         let h1 = hunk(1, 1, vec![line(LineKind::Add, "x")]);
         let mut nn = line(LineKind::Add, "x");
-        nn.no_newline = true;
+        nn.no_newline = Some(b"\\ No newline at end of file".to_vec());
         let h2 = hunk(1, 1, vec![nn]);
         assert_ne!(subhunk_id(&f, &h1), subhunk_id(&f, &h2));
     }

@@ -164,7 +164,7 @@ pub fn slice_changed_lines(h: &Hunk, selected: &BTreeSet<usize>) -> Result<Hunk,
                     lines.push(Line {
                         kind: LineKind::Context,
                         text: l.text.clone(),
-                        no_newline: l.no_newline,
+                        no_newline: l.no_newline.clone(),
                     });
                 }
             }
@@ -192,17 +192,18 @@ pub fn slice_changed_lines(h: &Hunk, selected: &BTreeSet<usize>) -> Result<Hunk,
 /// Repair a `\ No newline at end of file` marker that is no longer at the end of the body.
 ///
 /// A retained (unselected) deletion that sat at EOF became a context line still carrying the
-/// no-newline flag. If it is no longer the last line — selected additions follow it — a plain
+/// no-newline marker. If it is no longer the last line — selected additions follow it — a plain
 /// context line is both malformed (a mid-hunk no-newline marker) and wrong: appending after a
 /// no-newline line requires that line to gain a trailing newline. Represent that the way git
 /// does — delete the no-newline line and re-add it with a newline — so the piece applies. A
-/// well-formed diff never carries a no-newline flag on a non-last context line, so this only
+/// well-formed diff never carries a no-newline marker on a non-last context line, so this only
 /// ever touches lines [`slice_changed_lines`] just converted from a deletion; deletions and
-/// additions keep their own flags (a valid `-a\No newline +b` at EOF round-trips).
+/// additions keep their own markers (a valid `-a\No newline +b` at EOF round-trips).
 fn fix_mid_hunk_no_newline(lines: &mut Vec<Line>) {
     let n = lines.len();
-    let needs_fix =
-        |i: usize, l: &Line| i + 1 < n && matches!(l.kind, LineKind::Context) && l.no_newline;
+    let needs_fix = |i: usize, l: &Line| {
+        i + 1 < n && matches!(l.kind, LineKind::Context) && l.no_newline.is_some()
+    };
     if !lines.iter().enumerate().any(|(i, l)| needs_fix(i, l)) {
         return;
     }
@@ -212,12 +213,12 @@ fn fix_mid_hunk_no_newline(lines: &mut Vec<Line>) {
             fixed.push(Line {
                 kind: LineKind::Del,
                 text: l.text.clone(),
-                no_newline: true,
+                no_newline: l.no_newline.clone(),
             });
             fixed.push(Line {
                 kind: LineKind::Add,
                 text: l.text,
-                no_newline: false,
+                no_newline: None,
             });
         } else {
             fixed.push(l);
@@ -313,6 +314,23 @@ impl PrefixCounts {
     }
 }
 
+/// The start one side of a sub-hunk must carry: the parent's start advanced by `off`, the count
+/// of that side's lines before the slice.
+///
+/// A side with no lines of its own reports the *preceding* line — git writes `@@ -3,0 +4 @@` for
+/// a line appended after old line 3 — so the advanced position is one line too far. At `off == 0`
+/// the parent header already carries the normalised value and is taken as is. Saturating, like
+/// [`crate::renumber::anchor`]: the starts come from the input header, and a sum past `u32::MAX`
+/// must clamp rather than wrap on a synthetic diff.
+fn side_start(parent_start: u32, off: u32, lines: u32) -> u32 {
+    let start = parent_start.saturating_add(off);
+    if lines == 0 && off > 0 {
+        start - 1
+    } else {
+        start
+    }
+}
+
 /// Build a Hunk from a slice of `h.lines` starting at absolute index `abs_start`, whose
 /// preceding lines tally `pre` (context, added, deleted), recomputing old/new start offsets
 /// and line counts.
@@ -326,11 +344,9 @@ fn rebuild_subhunk(h: &Hunk, slice: &[Line], abs_start: usize, pre: (u32, u32, u
     let old_lines = ctx + del;
     let new_lines = ctx + add;
     Hunk {
-        // Saturating, like `renumber::anchor`: the starts come from the input header, and a
-        // sum past u32::MAX must clamp rather than wrap on a synthetic diff.
-        old_start: h.old_start.saturating_add(old_off),
+        old_start: side_start(h.old_start, old_off, old_lines),
         old_lines,
-        new_start: h.new_start.saturating_add(new_off),
+        new_start: side_start(h.new_start, new_off, new_lines),
         new_lines,
         section: if abs_start == 0 {
             h.section.clone()
@@ -362,6 +378,8 @@ mod tests {
     /// a hand-rolled renderer here would let a rendering bug pass unnoticed.
     fn assemble(subs: &[Hunk]) -> Vec<u8> {
         emit(&Patch {
+            preamble: Vec::new(),
+            no_trailing_newline: false,
             files: vec![FileDiff {
                 headers: vec![b"--- a/f".to_vec(), b"+++ b/f".to_vec()],
                 trailer: Vec::new(),
@@ -385,6 +403,49 @@ diff --git a/f b/f
 +D
  e
 ";
+
+    /// A side with no lines of its own reports the line *before* its empty range, the way git
+    /// writes it (`@@ -3,0 +4 @@`). Adding the offset to the parent's start points one line
+    /// past that, so the header describes a position the result does not have.
+    #[test]
+    fn a_side_with_no_lines_carries_the_preceding_line_number() {
+        // a,b,c with b -> B and d appended: git renders the pair as one hunk, and `git diff -U0`
+        // of the same change writes `@@ -3,0 +4 @@` for the appended line.
+        let h = hunk(
+            "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,3 +1,4 @@
+ a
+-b
++B
+ c
++d
+",
+        );
+        let subs = auto_split_hunk(&h);
+        assert_eq!(subs.len(), 2);
+        assert_eq!((subs[1].old_start, subs[1].old_lines), (3, 0));
+
+        // The mirror case: a,b,c,d,e -> a,c leaves a pure deletion whose new side is empty.
+        let h = hunk(
+            "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,5 +1,2 @@
+ a
+-b
+ c
+-d
+-e
+",
+        );
+        let subs = auto_split_hunk(&h);
+        assert_eq!(subs.len(), 2);
+        assert_eq!((subs[1].new_start, subs[1].new_lines), (2, 0));
+    }
 
     #[test]
     fn splits_two_changes_separated_by_context() {
@@ -680,13 +741,13 @@ diff --git a/f b/f
         assert_eq!(p.lines[0].kind, LineKind::Del);
         assert_eq!(p.lines[0].text, b"a");
         assert!(
-            p.lines[0].no_newline,
-            "the deleted `a` keeps the no-newline flag"
+            p.lines[0].no_newline.is_some(),
+            "the deleted `a` keeps its no-newline marker"
         );
         assert_eq!(p.lines[1].kind, LineKind::Add);
         assert_eq!(p.lines[1].text, b"a");
         assert!(
-            !p.lines[1].no_newline,
+            p.lines[1].no_newline.is_none(),
             "the re-added `a` gains a trailing newline"
         );
         // old side: one deletion; new side: re-added a + b + c.

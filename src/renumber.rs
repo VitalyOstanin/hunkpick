@@ -18,7 +18,7 @@ use crate::model::{FileContent, Hunk, Patch};
 /// lines, a pure deletion no new-side lines — and git writes the *preceding* line number in the
 /// header (`@@ -2,0 +3 @@`, `@@ -3 +2,0 @@`). Normalising both cases to "the line this hunk
 /// starts at" keeps the offset arithmetic below uniform.
-fn anchor(start: u32, count: u32) -> i64 {
+pub(crate) fn anchor(start: u32, count: u32) -> i64 {
     i64::from(start) + i64::from(count == 0)
 }
 

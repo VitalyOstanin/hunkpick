@@ -1,5 +1,5 @@
 use crate::model::*;
-use crate::renumber::expected_new_start;
+use crate::renumber::{anchor, expected_new_start};
 use std::fmt;
 use std::io::Write;
 use std::path::Path;
@@ -132,35 +132,31 @@ fn check_hunks(patch: &Patch, check_new_start: bool) -> Result<(), ValidationErr
         let FileContent::Text(hunks) = &f.content else {
             continue; // binary files have no hunk bodies to check
         };
-        // Ends are computed in u64: both operands come straight from the input header, and a
-        // sum near u32::MAX would panic in a debug build and wrap in a release one — wrapping
-        // makes the overlap comparison below decide on a meaningless number.
-        let mut prev_old_end: Option<u64> = None;
-        let mut prev_new_end: Option<u64> = None;
+        // Positions are normalised through `renumber::anchor` and computed in i64. Both reasons
+        // matter: a side with a zero count reports the line *before* its empty range (git's
+        // convention), so raw header numbers make a pure deletion following another hunk look
+        // like an overlap; and a sum near u32::MAX would panic in a debug build and wrap in a
+        // release one, deciding the comparison on a meaningless number.
+        let mut prev_old_end: Option<i64> = None;
+        let mut prev_new_end: Option<i64> = None;
         // Net `added - deleted` of the hunks already seen in this file: what the new-side
         // anchor of every later hunk is shifted by.
         let mut delta: i64 = 0;
         for (i, h) in hunks.iter().enumerate() {
             let (add, del) = check_one_hunk(h, &path, i, check_new_start, delta)?;
             delta += i64::from(add) - i64::from(del);
-            if let Some(pe) = prev_old_end {
-                if u64::from(h.old_start) < pe {
-                    return Err(ValidationError::OverlappingHunks {
-                        file: path.clone(),
-                        hunk_index: i,
-                    });
-                }
+            let old_at = anchor(h.old_start, h.old_lines);
+            let new_at = anchor(h.new_start, h.new_lines);
+            if prev_old_end.is_some_and(|pe| old_at < pe)
+                || prev_new_end.is_some_and(|pe| new_at < pe)
+            {
+                return Err(ValidationError::OverlappingHunks {
+                    file: path.clone(),
+                    hunk_index: i,
+                });
             }
-            if let Some(pe) = prev_new_end {
-                if u64::from(h.new_start) < pe {
-                    return Err(ValidationError::OverlappingHunks {
-                        file: path.clone(),
-                        hunk_index: i,
-                    });
-                }
-            }
-            prev_old_end = Some(u64::from(h.old_start) + u64::from(h.old_lines));
-            prev_new_end = Some(u64::from(h.new_start) + u64::from(h.new_lines));
+            prev_old_end = Some(old_at + i64::from(h.old_lines));
+            prev_new_end = Some(new_at + i64::from(h.new_lines));
         }
     }
     Ok(())
@@ -359,6 +355,54 @@ diff --git a/f b/f
 -r
 +R
  s
+"
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(validate_internal(&p), Ok(()));
+    }
+
+    /// A hunk with no new-side lines reports the line *before* its empty range, so its header
+    /// number equals the last line of the hunk above it. Comparing the raw numbers reads that as
+    /// an overlap; the positions have to be normalised the way `renumber::anchor` does.
+    #[test]
+    fn a_pure_deletion_after_another_hunk_is_not_an_overlap() {
+        // What `git diff` gives for a,b,c,d,e -> a,c, split at the context gap: the second
+        // hunk's `+2,0` is exactly what `git diff -U0` writes for the same change.
+        let p = parse(
+            "\
+--- a/f
++++ b/f
+@@ -1,3 +1,2 @@
+ a
+-b
+ c
+@@ -4,2 +2,0 @@
+-d
+-e
+"
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(validate_internal(&p), Ok(()));
+        assert_eq!(validate_input(&p), Ok(()));
+    }
+
+    /// The mirror case on the old side: a pure insertion carries the line before its empty
+    /// old-side range, which is the last old line the hunk above covers.
+    #[test]
+    fn a_pure_insertion_after_another_hunk_is_not_an_overlap() {
+        let p = parse(
+            "\
+--- a/f
++++ b/f
+@@ -1,2 +1,2 @@
+-a
++A
+ b
+@@ -2,0 +3,2 @@
++x
++y
 "
             .as_bytes(),
         )

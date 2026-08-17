@@ -18,8 +18,11 @@ pub struct Line {
     /// A trailing '\r' (CRLF input) is preserved here. Stored as raw bytes so any input
     /// encoding (or invalid UTF-8) round-trips unchanged.
     pub text: Vec<u8>,
-    /// True when this line is followed by "\ No newline at end of file".
-    pub no_newline: bool,
+    /// The `\ No newline at end of file` marker that follows this line, as it arrived and
+    /// without its line ending — `Some(b"\\ No newline at end of file")`, or with a trailing
+    /// `\r` in a CRLF diff. `None` when the line ends normally. Kept verbatim rather than as a
+    /// flag so the marker is emitted with the line ending it came with.
+    pub no_newline: Option<Vec<u8>>,
 }
 
 /// One hunk: the `@@ -old_start,old_lines +new_start,new_lines @@ section` header and its body.
@@ -71,11 +74,21 @@ pub struct FileDiff {
     pub content: FileContent,
 }
 
-/// A parsed unified diff: its file entries in input order.
+/// A parsed unified diff: its file entries in input order, plus whatever preceded the first
+/// one.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Patch {
+    /// Raw lines before the first file entry, verbatim and without trailing '\n': the mail
+    /// headers, commit message and diffstat of a `git format-patch` output, or any other
+    /// preamble. Kept so the diff renders back unchanged — the counterpart of
+    /// [`FileDiff::trailer`], which holds the mail's footer.
+    pub preamble: Vec<Vec<u8>>,
     /// File entries in the order they appear in the diff.
     pub files: Vec<FileDiff>,
+    /// True when the input's last line had no line ending — a diff pasted or piped without its
+    /// final newline. Spelled negatively so the common case is the `Default` value, matching
+    /// [`Line::no_newline`].
+    pub no_trailing_newline: bool,
 }
 
 impl FileDiff {
@@ -164,17 +177,17 @@ mod tests {
                 Line {
                     kind: LineKind::Context,
                     text: b"a".to_vec(),
-                    no_newline: false,
+                    no_newline: None,
                 },
                 Line {
                     kind: LineKind::Del,
                     text: b"b".to_vec(),
-                    no_newline: false,
+                    no_newline: None,
                 },
                 Line {
                     kind: LineKind::Add,
                     text: b"c".to_vec(),
-                    no_newline: false,
+                    no_newline: None,
                 },
             ],
         };
