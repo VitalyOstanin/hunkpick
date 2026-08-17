@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stdin is not a terminal, so pipelines are unaffected.
 - Selecting by content id resolves through an index built once per invocation instead of a scan
   per id: on a 20 000 sub-hunk diff, selecting every id went from 0.22 s to 0.06 s.
+- Release archives are now verified by running the packaged binary and comparing its
+  `--version` with the archive name, so a packaging fault is caught before upload. CI gained a
+  `cargo semver-checks` gate over the public API, the scheduled fuzz run bounds a single input
+  with `-timeout`, and the versions of the tools CI installs are pinned.
+
 ## [0.8.0] - 2026-08-17
 
 ### Fixed

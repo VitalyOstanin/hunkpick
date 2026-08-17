@@ -73,10 +73,16 @@ jobs:
           # read-only starting material committed to the repository — a diff of each shape the
           # parser handles, so a cold run does not spend its budget guessing "diff --git".
           # The dictionary supplies the same tokens as mutation material.
+          #
+          # -timeout=10: parsing an input of the size libFuzzer generates takes milliseconds
+          # (the whole 9 MB benchmark diff parses in under a second), so ten seconds is a wide
+          # margin over any healthy input and still reports a hang as a crash within the run.
+          # The libFuzzer default is 1200 s, long enough to swallow a fifth of a one-hour
+          # search before saying anything.
           cargo fuzz run --target x86_64-unknown-linux-gnu "$TARGET" \
             "fuzz/corpus/$TARGET" "fuzz/seeds/$TARGET" \
             -- "-max_total_time=$((MINUTES * 60))" \
-            -dict=fuzz/dictionaries/diff.dict -print_final_stats=1
+            -dict=fuzz/dictionaries/diff.dict -print_final_stats=1 -timeout=10
       - name: Save the corpus
         # `always()`: see the restore step — a crash is the run worth keeping the corpus from.
         if: always()

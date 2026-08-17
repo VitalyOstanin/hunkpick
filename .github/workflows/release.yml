@@ -136,9 +136,9 @@ jobs:
       # Prebuilt nextest binary: the .config/nextest.toml profile enforces a
       # per-test timeout and bounded parallelism that `cargo test` cannot
       # express. Mirrors the CI test job so the release gate runs the same way.
-      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.143
       - name: Fetch dependencies (with retry)
         uses: ./.github/actions/cargo-fetch-retry
       - name: cargo build
@@ -353,9 +353,9 @@ jobs:
       # The released binary statically links third-party crates whose licenses require the
       # copyright notice to travel with the binary, so the notices file is part of the archive
       # contract (scripts/verify-archive.sh enforces its presence).
-      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
         with:
-          tool: cargo-about
+          tool: cargo-about@0.9.1
       - name: Generate third-party notices
         shell: bash
         run: bash scripts/generate-notices.sh

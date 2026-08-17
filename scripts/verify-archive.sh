@@ -9,6 +9,8 @@
 #   3. Archive extracts to a single top-level directory matching the stem
 #   4. That directory contains exactly: <bin_name>, README.md, LICENSE,
 #      THIRD-PARTY-NOTICES.md
+#   5. The packaged binary runs and reports the version in the filename
+#      (skipped, with a message, for an archive built for another host)
 
 set -euo pipefail
 
@@ -128,6 +130,41 @@ if [ "$actual_joined" != "$expected_sorted" ]; then
     echo "  actual:" >&2
     printf '%s\n' "$actual_joined" | sed 's/^/    /' >&2
     exit 1
+fi
+
+# 5. The packaged binary must run and report the version the filename claims. The build's own
+#    smoke test runs the binary out of target/, so it cannot catch a packaging fault: the wrong
+#    file archived, a truncated copy, an executable bit lost in the tarball. Only an archive
+#    built for this host can be executed, so a cross-built one is reported as skipped rather
+#    than silently passing.
+case "$(uname -s)" in
+    Linux) host_os=unknown-linux-gnu ;;
+    Darwin) host_os=apple-darwin ;;
+    MINGW*|MSYS*|CYGWIN*) host_os=pc-windows-msvc ;;
+    *) host_os=unknown ;;
+esac
+case "$(uname -m)" in
+    x86_64|amd64) host_arch=x86_64 ;;
+    arm64|aarch64) host_arch=aarch64 ;;
+    *) host_arch=unknown ;;
+esac
+
+if [ "$target" = "${host_arch}-${host_os}" ]; then
+    if [ ! -x "${root}/${BIN_NAME}" ]; then
+        echo "error: packaged binary is not executable: ${BIN_NAME}" >&2
+        exit 1
+    fi
+    reported=$("${root}/${BIN_NAME}" --version) || {
+        echo "error: packaged binary failed to run: ${BIN_NAME} --version" >&2
+        exit 1
+    }
+    if [ "$reported" != "hunkpick ${version}" ]; then
+        echo "error: packaged binary reports '${reported}', archive claims version ${version}" >&2
+        exit 1
+    fi
+    echo "ran: ${reported}" >&2
+else
+    echo "skip: ${target} archive cannot run on ${host_arch}-${host_os}" >&2
 fi
 
 echo "ok: ${asset_file}" >&2

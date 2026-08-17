@@ -35,7 +35,22 @@ cargo t-doc                                                 # doc tests (nextest
 cargo clippy --all-targets --all-features -- -D warnings    # lint, warnings denied
 cargo fmt --all --check                                     # formatting (apply with `cargo fmt --all`)
 cargo +1.85 build --all-features                            # MSRV build
+cargo semver-checks check-release                           # public API vs the released version
 ```
+
+The last one needs [`cargo-semver-checks`](https://github.com/obi1kenobi/cargo-semver-checks)
+and a network connection: it builds the crate twice — this tree and the version on crates.io —
+and reports any incompatibility the version in `Cargo.toml` does not account for. Before 1.0 a
+breaking change is allowed, provided the minor version goes up with it; that is what the check
+enforces, and CI gates on it.
+
+The versions of the tools CI installs (`cargo-nextest`, `cargo-about`, `cargo-fuzz`,
+`cargo-llvm-cov`, `cargo-semver-checks`) are pinned in the `tool:` inputs of
+`taiki-e/install-action` across [`ci.yml`](.github/workflows/ci.yml),
+[`release.yml`](.github/workflows/release.yml) and
+[`fuzz-setup`](.github/actions/fuzz-setup/action.yml). Without a pin an upstream release lands
+in the next run and can turn CI red with no change in this repository; bump them deliberately,
+the same way action SHAs are bumped.
 
 `t` and `t-doc` are aliases defined in [`.cargo/config.toml`](.cargo/config.toml). Test runner
 limits (per-test timeout and thread count) live in
