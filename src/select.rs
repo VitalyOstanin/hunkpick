@@ -1073,6 +1073,44 @@ diff --git a/f b/f
         assert!(!text.contains("+B"), "other change excluded: {text}");
     }
 
+    /// Resolving `@id` selectors must stay linear in the size of the diff. Selecting by id is a
+    /// batch operation — read the ids from `list --json`, stage them in one invocation — and a
+    /// scan over every sub-hunk's hash per id makes that quadratic. Exercised here rather than
+    /// through the CLI because Windows caps a command line at 32 KiB, well below eight thousand
+    /// selectors.
+    #[test]
+    fn many_ids_resolve_without_quadratic_blowup() {
+        const RUNS: usize = 8_000;
+        let mut diff = format!(
+            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,{n} +1,{n} @@\n",
+            n = RUNS * 2
+        );
+        for i in 0..RUNS {
+            diff.push_str(&format!(" ctx{i}\n-old{i}\n+new{i}\n"));
+        }
+        let p = parse(diff.as_bytes()).unwrap();
+        let ids: Vec<String> = build_view(&p)[0]
+            .iter()
+            .map(|sub| format!("@{}", subhunk_id(&p.files[0], sub)))
+            .collect();
+        assert_eq!(ids.len(), RUNS, "one sub-hunk per change run");
+        let sels = parse_selectors(&ids).unwrap();
+
+        let started = std::time::Instant::now();
+        let out = select(&p, &sels).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(out.files[0].hunk_count(), RUNS, "every id is selected");
+        // The nextest profile bounds a test's runtime, but the documented fallback
+        // (`cargo test -- --test-threads=4`) does not: a quadratic regression would hang there
+        // instead of failing. Linear resolution of this input is a fraction of a second even in
+        // a debug build, so a minute is unreachable without a change in complexity.
+        assert!(
+            elapsed < std::time::Duration::from_secs(60),
+            "resolving {RUNS} ids took {elapsed:?}"
+        );
+    }
+
     #[test]
     fn select_id_is_case_insensitive() {
         let p = parse(TWO_CHANGES.as_bytes()).unwrap();
