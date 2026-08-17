@@ -35,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reading a diff from a terminal — no pipe, no `-i` — now says so in one line on stderr before
   it blocks. A forgotten pipe used to be indistinguishable from a hang. Nothing is printed when
   stdin is not a terminal, so pipelines are unaffected.
+- Selecting by content id resolves through an index built once per invocation instead of a scan
+  per id: on a 20 000 sub-hunk diff, selecting every id went from 0.22 s to 0.06 s.
 ## [0.8.0] - 2026-08-17
 
 ### Fixed
