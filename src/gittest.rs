@@ -19,16 +19,7 @@ fn git(dir: &Path) -> Command {
     cmd.current_dir(dir);
     cmd.env("GIT_CONFIG_GLOBAL", dir.join("absent-global-gitconfig"));
     cmd.env("GIT_CONFIG_SYSTEM", dir.join("absent-system-gitconfig"));
-    for var in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_COMMON_DIR",
-        "GIT_CEILING_DIRECTORIES",
-    ] {
-        cmd.env_remove(var);
-    }
+    crate::gitenv::insulate_repo_location(&mut cmd);
     cmd
 }
 
@@ -42,15 +33,26 @@ pub(crate) fn repo_with_file(content: &str) -> tempfile::TempDir {
 }
 
 /// True if `diff_bytes` applies to the working tree in `dir` (`git apply --check`).
+///
+/// Feeds stdin from a separate thread, as [`crate::validate::validate_with_git`] does: writing
+/// the whole diff before waiting deadlocks once git fills its stderr pipe, and a rejected diff
+/// is precisely what this helper is asked about.
 pub(crate) fn apply_check(diff_bytes: &[u8], dir: &Path) -> bool {
     let mut child = git(dir)
         .arg("apply")
         .arg("--check")
         .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(diff_bytes).unwrap();
-    child.wait().unwrap().success()
+    let mut stdin = child.stdin.take().expect("stdin was configured as piped");
+    std::thread::scope(|scope| {
+        scope.spawn(move || stdin.write_all(diff_bytes));
+        child.wait_with_output().unwrap()
+    })
+    .status
+    .success()
 }
 
 /// True if `diff_bytes` applies to a file `f` seeded with `content` in a fresh repository.

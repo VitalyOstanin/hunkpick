@@ -664,3 +664,75 @@ fn a_combined_diff_is_rejected_as_a_usage_error() {
             .stderr(predicate::str::contains("combined"));
     }
 }
+
+/// `git diff --cc` writes no `---`/`+++` pair for a file resolved identically in both parents,
+/// so such a combined diff carries none of the marker lines the non-diff guard looks for. It
+/// must still be named for what it is: "no diff markers found" sends the caller looking for a
+/// truncated pipe rather than at the format.
+#[test]
+fn a_combined_diff_without_file_markers_is_still_named_as_combined() {
+    let diff = concat!(
+        "diff --cc f\n",
+        "index 1111111,2222222..3333333\n",
+        "@@@ -1,2 -1,2 +1,2 @@@\n",
+        "  ctx\n",
+        "++ added\n",
+    );
+
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .arg("list")
+        .write_stdin(diff)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("combined"));
+}
+
+// ---------------------------------------------------------------------------
+// 14. split_addresses_a_path_with_invalid_utf8
+// ---------------------------------------------------------------------------
+
+/// `split` addresses a hunk the same way `select` addresses a sub-hunk, so it has to accept the
+/// same path bytes: a file whose name is not valid UTF-8 is otherwise reachable by `select` and
+/// unreachable by `split`, for no reason the user can see.
+///
+/// Linux-only, and for the same reasons as `path_with_invalid_utf8_is_addressable` above.
+#[test]
+#[cfg(target_os = "linux")]
+fn split_addresses_a_path_with_invalid_utf8() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let raw: Vec<u8> = b"bad\xffname.txt".to_vec();
+    let os_name = OsString::from_vec(raw.clone());
+
+    let dir = common::repo_with(&[]);
+    std::fs::write(dir.path().join(&os_name), "a\nb\nc\nd\ne\n").unwrap();
+    common::sys(&dir, &["add", "-A"]);
+    common::sys(&dir, &["commit", "-qm", "add"]);
+    std::fs::write(dir.path().join(&os_name), "a\nB\nc\nD\ne\n").unwrap();
+    let diff = common::git_output_bytes(&dir, &["-c", "core.quotePath=false", "diff"]);
+
+    let mut address = raw.clone();
+    address.extend_from_slice(b":1");
+    let stdout = Command::cargo_bin("hunkpick")
+        .unwrap()
+        .arg("split")
+        .arg(OsString::from_vec(address))
+        .args(["--at", "3"])
+        .write_stdin(diff)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        String::from_utf8_lossy(&stdout).matches("@@ -").count(),
+        2,
+        "the hunk is cut in two"
+    );
+    assert!(
+        stdout.windows(raw.len()).any(|w| w == raw.as_slice()),
+        "emitted diff keeps the original path bytes"
+    );
+}

@@ -3,7 +3,7 @@ use crate::renumber::renumber_new_side;
 use crate::split::auto_split_hunk;
 use crate::split::slice_changed_lines;
 use crate::subhunk_id::subhunk_hash;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::fmt;
 
@@ -132,8 +132,8 @@ pub fn parse_selectors<S: AsRef<OsStr>>(args: &[S]) -> Result<Vec<Selector>, Sel
         let bytes = os_bytes(arg.as_ref());
         // A path that is not valid UTF-8 can only be the `path:set` form: everything else in
         // the grammar is ASCII. Handle it on bytes and skip the textual forms below.
-        let Ok(a) = std::str::from_utf8(&bytes) else {
-            out.push(parse_binary_path_form(&bytes)?);
+        let Ok(a) = std::str::from_utf8(bytes) else {
+            out.push(parse_binary_path_form(bytes)?);
             continue;
         };
         // 1. path:set form. Checked first so a file named "@foo" (addressed "@foo:1") and a
@@ -193,22 +193,12 @@ fn parse_path_form(arg: &str) -> Result<Option<Selector>, SelectError> {
     }
 }
 
-/// The bytes of a command-line argument. On Unix an argument is an arbitrary byte string, which
-/// is what a path in a diff can be; elsewhere the platform guarantees valid Unicode, so the
-/// lossy conversion never actually loses anything.
-fn os_bytes(arg: &OsStr) -> std::borrow::Cow<'_, [u8]> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        std::borrow::Cow::Borrowed(arg.as_bytes())
-    }
-    #[cfg(not(unix))]
-    {
-        match arg.to_string_lossy() {
-            std::borrow::Cow::Borrowed(s) => std::borrow::Cow::Borrowed(s.as_bytes()),
-            std::borrow::Cow::Owned(s) => std::borrow::Cow::Owned(s.into_bytes()),
-        }
-    }
+/// The bytes of a command-line argument, as the platform stores them: the raw bytes on Unix,
+/// where an argument (and a path in a diff) is an arbitrary byte string, and WTF-8 elsewhere.
+/// Going through `to_string_lossy` instead would replace an unpaired surrogate with U+FFFD and
+/// silently address a different file than the one asked for.
+fn os_bytes(arg: &OsStr) -> &[u8] {
+    arg.as_encoded_bytes()
 }
 
 /// Read a selector whose bytes are not valid UTF-8. Only `path:set` can look like that — the
@@ -272,7 +262,10 @@ impl fmt::Display for SetParseError {
             SetParseError::NotANumber(s) => write!(f, "not a number: {s}"),
             SetParseError::ZeroBound => write!(f, "indices are 1-based, 0 is not valid"),
             SetParseError::ReversedRange { lo, hi } => write!(f, "reversed range: {lo}-{hi}"),
-            SetParseError::TooLarge => write!(f, "range too large"),
+            SetParseError::TooLarge => write!(
+                f,
+                "range too large: at most {MAX_SELECTOR_INDICES} indices per selector"
+            ),
             SetParseError::RemovedRange => write!(f, "the @lo-hi range form was removed; use @L"),
         }
     }
@@ -436,12 +429,19 @@ fn resolve_selectors(
     hash_cache: &mut BTreeMap<usize, Vec<u64>>,
 ) -> Result<BTreeMap<usize, Vec<Chosen>>, SelectError> {
     let mut chosen: BTreeMap<usize, Vec<Chosen>> = BTreeMap::new();
+    // Built once for the whole invocation: every path selector looks its file up here.
+    let paths = PathIndex::new(patch);
     for sel in selectors {
         match sel {
             Selector::Id(id) => resolve_id(patch, id, subs_cache, hash_cache, &mut chosen)?,
-            Selector::File { path, indices } => {
-                resolve_file_selector(patch, path.as_deref(), indices, subs_cache, &mut chosen)?
-            }
+            Selector::File { path, indices } => resolve_file_selector(
+                patch,
+                &paths,
+                path.as_deref(),
+                indices,
+                subs_cache,
+                &mut chosen,
+            )?,
         }
     }
     Ok(chosen)
@@ -451,12 +451,13 @@ fn resolve_selectors(
 /// record its picks in `chosen`.
 fn resolve_file_selector(
     patch: &Patch,
+    paths: &PathIndex<'_>,
     path: Option<&[u8]>,
     indices: &IndexSet,
     subs_cache: &mut BTreeMap<usize, Vec<Hunk>>,
     chosen: &mut BTreeMap<usize, Vec<Chosen>>,
 ) -> Result<(), SelectError> {
-    let fi = resolve_file(patch, path)?;
+    let fi = paths.resolve(path)?;
     // A binary file has no sub-hunks; a non-line-set selector picks the whole binary change.
     // A line-set selector makes no sense for a binary file.
     if matches!(patch.files[fi].content, FileContent::Binary(_)) {
@@ -597,11 +598,20 @@ fn emit_selection(
     subs_cache: &BTreeMap<usize, Vec<Hunk>>,
 ) -> Result<Patch, SelectError> {
     let mut files = Vec::new();
+    let mut last_fi = None;
+    // Whether the file emitted last ends on the same line its source did — see the flag at the
+    // end of this function. Set per file; only the value left by the last one matters.
+    let mut ends_on_the_files_last_line = false;
     for (fi, mut picks) in chosen {
+        last_fi = Some(fi);
         let src = &patch.files[fi];
         let content = match &src.content {
-            // A binary file has no sub-hunks; its picks vec is always empty.
-            FileContent::Binary(b) => FileContent::Binary(b.clone()),
+            // A binary file has no sub-hunks; its picks vec is always empty. It is taken whole,
+            // so its last line is emitted.
+            FileContent::Binary(b) => {
+                ends_on_the_files_last_line = true;
+                FileContent::Binary(b.clone())
+            }
             FileContent::Text(_) => {
                 reject_conflicting_line_set_picks(&picks)?;
                 // Order by sub-hunk index so emitted hunks follow old-file order and equal-index
@@ -613,7 +623,12 @@ fn emit_selection(
                 picks.dedup_by(
                     |a, b| matches!((a, b), (Chosen::Whole(x), Chosen::Whole(y)) if x == y),
                 );
-                let hunks = materialise_picks(&subs_cache[&fi], &picks)?;
+                let subs = &subs_cache[&fi];
+                // The file's last line is the last line of its last sub-hunk, and it survives
+                // only when that sub-hunk is taken whole — an `@L` cut may drop it.
+                ends_on_the_files_last_line =
+                    matches!(picks.last(), Some(Chosen::Whole(i)) if *i == subs.len());
+                let hunks = materialise_picks(subs, &picks)?;
                 reject_partial_selection_of_a_deleted_file(src, &hunks)?;
                 FileContent::Text(hunks)
             }
@@ -622,20 +637,17 @@ fn emit_selection(
         // of a format-patch) carries over: it keeps its meaning whichever sub-hunks were
         // picked. Lines recorded between hunks have no defined place once hunks are dropped
         // or split, so they are not emitted.
-        let src_hunks = match &src.content {
-            FileContent::Text(h) => h.len(),
-            FileContent::Binary(_) => 0,
-        };
-        let out_hunks = match &content {
-            FileContent::Text(h) => h.len(),
-            FileContent::Binary(_) => 0,
-        };
-        let trailer = src
+        let src_hunks = src.hunk_count();
+        let out_hunks = content.hunk_count();
+        let trailer: Vec<_> = src
             .trailer
             .iter()
             .filter(|(at, _)| *at == src_hunks)
             .map(|(_, l)| (out_hunks, l.clone()))
             .collect();
+        // A tail is emitted after the hunks and always carries over, so with one present the
+        // file ends on the line it ended on before, whichever sub-hunks were picked.
+        ends_on_the_files_last_line |= !trailer.is_empty();
         files.push(FileDiff {
             headers: src.headers.clone(),
             trailer,
@@ -647,10 +659,17 @@ fn emit_selection(
     // The preamble carries over with the files: a format-patch input stays a mail, head and
     // footer both. Its diffstat then describes the original commit rather than the selection —
     // the caller chose to filter a mail, and hunkpick does not rewrite prose.
+    // The flag is about one line of the input — its last. It carries over only when the result
+    // ends on that same line: the input's last file is also the result's last, and that file is
+    // emitted down to its final line. Otherwise the result ends somewhere else, and dropping the
+    // newline there would truncate a line nobody asked to change.
+    let ends_on_the_inputs_last_line = patch.no_trailing_newline
+        && last_fi == patch.files.len().checked_sub(1)
+        && ends_on_the_files_last_line;
     Ok(Patch {
         preamble: patch.preamble.clone(),
         files,
-        no_trailing_newline: patch.no_trailing_newline,
+        no_trailing_newline: ends_on_the_inputs_last_line,
     })
 }
 
@@ -703,58 +722,100 @@ fn resolve_id(
     Ok(())
 }
 
-/// Resolve an optional path to a file index. With no path, succeeds only for single-file diffs.
-pub(crate) fn resolve_file(patch: &Patch, path: Option<&[u8]>) -> Result<usize, SelectError> {
-    match path {
-        None => {
-            if patch.files.len() == 1 {
+/// Which entries of a patch carry a given path. `Many` is kept as a distinct state rather than
+/// a list: the only thing the caller does with it is refuse the selector as ambiguous.
+#[derive(Clone, Copy)]
+enum PathOwner {
+    One(usize),
+    Many,
+}
+
+/// Path (either side) to the entry carrying it, built once per invocation.
+///
+/// Scanning `patch.files` per selector is O(selectors x files), and naming one selector per
+/// file is the documented scripted use: 16 000 of each took 1.5 s that way against a fraction
+/// of that here. Borrows the patch, so no path bytes are copied.
+pub(crate) struct PathIndex<'a> {
+    by_path: HashMap<&'a [u8], PathOwner>,
+    file_count: usize,
+}
+
+impl<'a> PathIndex<'a> {
+    pub(crate) fn new(patch: &'a Patch) -> Self {
+        let mut by_path: HashMap<&'a [u8], PathOwner> = HashMap::with_capacity(patch.files.len());
+        for (fi, f) in patch.files.iter().enumerate() {
+            for path in [f.new_path.as_deref(), f.old_path.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                by_path
+                    .entry(path)
+                    .and_modify(|owner| {
+                        // The two sides of one entry name the same path in the common case;
+                        // that is not an ambiguity, a second *entry* is.
+                        if !matches!(owner, PathOwner::One(seen) if *seen == fi) {
+                            *owner = PathOwner::Many;
+                        }
+                    })
+                    .or_insert(PathOwner::One(fi));
+            }
+        }
+        PathIndex {
+            by_path,
+            file_count: patch.files.len(),
+        }
+    }
+
+    /// Resolve an optional path to a file index. With no path, succeeds only for single-file
+    /// diffs.
+    pub(crate) fn resolve(&self, path: Option<&[u8]>) -> Result<usize, SelectError> {
+        let Some(p) = path else {
+            return if self.file_count == 1 {
                 Ok(0)
             } else {
                 Err(SelectError::AmbiguousPath(
                     "<no path on multi-file diff>".into(),
                 ))
-            }
-        }
-        Some(p) => {
-            let matches: Vec<usize> = patch
-                .files
-                .iter()
-                .enumerate()
-                .filter(|(_, f)| {
-                    f.new_path.as_deref() == Some(p) || f.old_path.as_deref() == Some(p)
-                })
-                .map(|(i, _)| i)
-                .collect();
-            match matches.as_slice() {
-                [one] => Ok(*one),
-                [] => Err(SelectError::UnknownPath(
-                    String::from_utf8_lossy(p).into_owned(),
-                )),
-                _ => Err(SelectError::AmbiguousPath(
-                    String::from_utf8_lossy(p).into_owned(),
-                )),
-            }
+            };
+        };
+        match self.by_path.get(p) {
+            Some(PathOwner::One(fi)) => Ok(*fi),
+            Some(PathOwner::Many) => Err(SelectError::AmbiguousPath(
+                String::from_utf8_lossy(p).into_owned(),
+            )),
+            None => Err(SelectError::UnknownPath(
+                String::from_utf8_lossy(p).into_owned(),
+            )),
         }
     }
 }
 
 /// Resolve `path:N` / `N` to (file_index, original_hunk_index_0based) for the `split` command.
-pub fn resolve_hunk(patch: &Patch, addr: &str) -> Result<(usize, usize), SelectError> {
-    let (path, nstr) = match addr.rsplit_once(':') {
-        Some((p, n)) if !p.is_empty() && n.parse::<usize>().is_ok() => (Some(p.to_string()), n),
-        _ => (None, addr),
+///
+/// Takes the address as an [`OsStr`] rather than a `&str` for the same reason
+/// [`parse_selectors`] does: a diff can name a file whose path is not valid UTF-8, and an
+/// address that cannot spell those bytes leaves such a file addressable by `select` and
+/// unreachable by `split`. Only the index after the last ':' is text; the path is bytes.
+pub fn resolve_hunk(patch: &Patch, addr: &OsStr) -> Result<(usize, usize), SelectError> {
+    let bytes = os_bytes(addr);
+    let shown = String::from_utf8_lossy(bytes).into_owned();
+    let index_of = |b: &[u8]| std::str::from_utf8(b).ok().and_then(|s| s.parse().ok());
+    // A path may itself contain ':', so the split point is the last one whose tail is an index.
+    let (path, n): (Option<&[u8]>, Option<usize>) = match bytes.iter().rposition(|&b| b == b':') {
+        Some(i) if i > 0 && index_of(&bytes[i + 1..]).is_some() => {
+            (Some(&bytes[..i]), index_of(&bytes[i + 1..]))
+        }
+        _ => (None, index_of(bytes)),
     };
-    let n: usize = nstr
-        .parse()
-        .map_err(|_| SelectError::BadSelector(addr.to_string()))?;
-    if n == 0 {
-        return Err(SelectError::BadSelector(addr.to_string()));
-    }
-    let fi = resolve_file(patch, path.as_deref().map(str::as_bytes))?;
+    let n = n.filter(|&n| n > 0).ok_or_else(|| {
+        // A bare address that is not an index is reported the way an unparsable selector is.
+        SelectError::BadSelector(shown.clone())
+    })?;
+    let fi = PathIndex::new(patch).resolve(path)?;
     match &patch.files[fi].content {
         FileContent::Text(h) if n <= h.len() => Ok((fi, n - 1)),
-        FileContent::Text(_) => Err(SelectError::NoIndex(addr.to_string())),
-        FileContent::Binary(_) => Err(SelectError::BadSelector(format!("{addr} (binary file)"))),
+        FileContent::Text(_) => Err(SelectError::NoIndex(shown)),
+        FileContent::Binary(_) => Err(SelectError::BadSelector(format!("{shown} (binary file)"))),
     }
 }
 
@@ -1088,7 +1149,7 @@ diff --git a/f b/f
     #[test]
     fn resolve_hunk_addresses_original_hunk() {
         let p = parse(TWO_CHANGES.as_bytes()).unwrap();
-        assert_eq!(resolve_hunk(&p, "1").unwrap(), (0, 0));
+        assert_eq!(resolve_hunk(&p, OsStr::new("1")).unwrap(), (0, 0));
     }
 
     #[test]

@@ -15,6 +15,14 @@ pub fn emit(patch: &Patch) -> Vec<u8> {
             out.extend_from_slice(h);
             out.push(b'\n');
         }
+        debug_assert!(
+            f.trailer.windows(2).all(|w| w[0].0 <= w[1].0),
+            "trailer entries must be ordered by the hunk they follow"
+        );
+        // One cursor walks the trailer alongside the hunks. Rescanning the whole list for every
+        // hunk was quadratic in their number: a 9 MB diff carrying a separator after each of its
+        // 128 000 hunks took 15 s to re-emit, against 0,2 s to list.
+        let mut ti = 0usize;
         match &f.content {
             FileContent::Binary(lines) => {
                 for l in lines {
@@ -25,21 +33,15 @@ pub fn emit(patch: &Patch) -> Vec<u8> {
             FileContent::Text(hunks) => {
                 for (i, h) in hunks.iter().enumerate() {
                     emit_hunk(&mut out, h);
-                    emit_trailer(&mut out, f, i + 1);
+                    emit_trailer_upto(&mut out, f, i + 1, &mut ti);
                 }
             }
         }
         // Lines tagged with a position past the emitted hunks (a file that lost hunks to a
         // selection, or a binary file) still belong to this file: flush what is left.
-        let emitted = match &f.content {
-            FileContent::Text(h) => h.len(),
-            FileContent::Binary(_) => 0,
-        };
-        for (at, l) in &f.trailer {
-            if *at > emitted {
-                out.extend_from_slice(l);
-                out.push(b'\n');
-            }
+        for (_, l) in &f.trailer[ti..] {
+            out.extend_from_slice(l);
+            out.push(b'\n');
         }
     }
     // Every line is written with its newline; drop the last one when the input had none, so a
@@ -77,13 +79,17 @@ fn emitted_size_hint(patch: &Patch) -> usize {
     n
 }
 
-/// Emit the trailing lines recorded right after the `at`-th hunk of `f`.
-fn emit_trailer(out: &mut Vec<u8>, f: &FileDiff, at: usize) {
-    for (pos, l) in &f.trailer {
-        if *pos == at {
-            out.extend_from_slice(l);
-            out.push(b'\n');
+/// Emit the trailing lines of `f` recorded no later than its `at`-th hunk, advancing `ti` past
+/// them. The entries are ordered by that position, so each is visited once across the whole
+/// file rather than once per hunk.
+fn emit_trailer_upto(out: &mut Vec<u8>, f: &FileDiff, at: usize, ti: &mut usize) {
+    while let Some((pos, l)) = f.trailer.get(*ti) {
+        if *pos > at {
+            break;
         }
+        out.extend_from_slice(l);
+        out.push(b'\n');
+        *ti += 1;
     }
 }
 

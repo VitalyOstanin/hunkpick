@@ -190,7 +190,7 @@ fn new_file(headers: Vec<Vec<u8>>) -> FileDiff {
 /// Whether the line marks a combined diff: the header git writes for a merge (`diff --cc`,
 /// `diff --combined`) or its hunk header, which has one `@` per side plus one (`@@@ -1,3 -1,3
 /// +1,3 @@@` for two parents).
-fn is_combined_marker(line: &[u8]) -> bool {
+pub fn is_combined_marker(line: &[u8]) -> bool {
     line.starts_with(b"diff --cc ")
         || line.starts_with(b"diff --combined ")
         || line.starts_with(b"@@@")
@@ -296,10 +296,7 @@ fn push_header(f: &mut FileDiff, line: &[u8]) {
         b.push(line.to_vec());
         return;
     }
-    let hunks_so_far = match &f.content {
-        FileContent::Text(h) => h.len(),
-        FileContent::Binary(_) => 0,
-    };
+    let hunks_so_far = f.hunk_count();
     if is_binary_marker(line) {
         match &mut f.content {
             FileContent::Text(h) if h.is_empty() => {
@@ -452,6 +449,12 @@ fn parse_hunk_header(line: &[u8]) -> Result<Hunk, ParseError> {
     let mut it = ranges.split_whitespace();
     let old = it.next().ok_or_else(bad)?;
     let new = it.next().ok_or_else(bad)?;
+    // A third token is not a header hunkpick can represent. Ignoring it parsed the line as if
+    // it read differently and emitted it without those bytes — a silent rewrite of the input,
+    // at exit 0. The same holds for a third component inside a range (see `parse_range`).
+    if it.next().is_some() {
+        return Err(bad());
+    }
     let (old_start, old_lines) = parse_range(old.strip_prefix('-').unwrap_or(old))?;
     let (new_start, new_lines) = parse_range(new.strip_prefix('+').unwrap_or(new))?;
     Ok(Hunk {
@@ -476,6 +479,11 @@ fn parse_range(s: &str) -> Result<(u32, u32), ParseError> {
             .map_err(|_| ParseError::BadHunkHeader(s.to_string()))?,
         None => 1,
     };
+    // `-1,3,9` has no meaning in a unified diff; parsing it as `-1,3` would drop the rest on
+    // the way out.
+    if parts.next().is_some() {
+        return Err(ParseError::BadHunkHeader(s.to_string()));
+    }
     Ok((start, count))
 }
 

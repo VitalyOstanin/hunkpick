@@ -252,14 +252,7 @@ fn changed_lines_split_new_file_first_part_stages_only_those_lines() {
     let dir = common::repo_with(&[]); // empty initial commit
     std::fs::write(dir.path().join("new.txt"), "l1\nl2\nl3\nl4\n").unwrap();
     common::sys(&dir, &["add", "-N", "new.txt"]); // intent-to-add: diff shows file creation
-    let diff = {
-        let out = std::process::Command::new("git")
-            .args(["diff"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        String::from_utf8(out.stdout).unwrap()
-    };
+    let diff = common::git_output(&dir, &["diff"]);
 
     let part1 = Command::cargo_bin("hunkpick")
         .unwrap()
@@ -271,15 +264,7 @@ fn changed_lines_split_new_file_first_part_stages_only_those_lines() {
         .stdout
         .clone();
 
-    let mut apply = std::process::Command::new("git")
-        .args(["apply", "--cached"])
-        .current_dir(dir.path())
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    use std::io::Write;
-    apply.stdin.take().unwrap().write_all(&part1).unwrap();
-    assert!(apply.wait().unwrap().success(), "first apply failed");
+    common::apply_cached(&dir, &part1);
 
     let staged = common::diff_staged(&dir);
     assert!(
@@ -422,6 +407,7 @@ fn many_change_runs_split_without_quadratic_blowup() {
         diff.push_str(&format!(" ctx{i}\n-old{i}\n+new{i}\n"));
     }
 
+    let started = std::time::Instant::now();
     let stdout = Command::cargo_bin("hunkpick")
         .unwrap()
         .args(["list", "--json"])
@@ -431,11 +417,21 @@ fn many_change_runs_split_without_quadratic_blowup() {
         .get_output()
         .stdout
         .clone();
+    let elapsed = started.elapsed();
     let text = String::from_utf8(stdout).unwrap();
     assert_eq!(
         text.matches("\"index\"").count(),
         RUNS,
         "one sub-hunk per change run"
+    );
+    // The nextest profile's slow-test timeout is the usual guard, but the documented fallback
+    // (`cargo test -- --test-threads=4`) has none: a quadratic regression would hang there
+    // instead of failing. A linear split of this input takes a fraction of a second even in a
+    // debug build, so a minute is unreachable without a change in complexity, and loaded
+    // machines do not trip it.
+    assert!(
+        elapsed < std::time::Duration::from_secs(60),
+        "listing {RUNS} change runs took {elapsed:?}; the split is no longer linear"
     );
 }
 
@@ -472,4 +468,198 @@ diff --git a/f b/f
         .assert()
         .success()
         .stdout(predicate::str::contains("@@ -17,3 +17,3 @@"));
+}
+
+/// `split` replaces one hunk with several, so every line recorded after a later hunk moves down
+/// by the pieces the split added. Without that shift the `-- ` signature `git format-patch`
+/// writes after the last hunk lands between the pieces, and `git apply` rejects the result with
+/// `patch fragment without header` while hunkpick itself still exits 0.
+#[test]
+fn split_keeps_trailing_lines_after_the_last_hunk() {
+    let diff = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,5 +1,5 @@
+ a
+-b
++B
+ c
+-d
++D
+ e
+-- 
+2.53.0
+";
+    // New-file line numbers: a=1 B=2 c=3 D=4 e=5. Cutting at context line 3 yields two pieces.
+    let out = common::run_ok_text(&["split", "1", "--at", "3"], diff);
+    assert_eq!(out.matches("@@ -").count(), 2, "two pieces expected: {out}");
+    let last_hunk = out.rfind("@@ -").expect("hunk header in output");
+    let signature = out.find("\n-- \n").expect("signature in output");
+    assert!(
+        signature > last_hunk,
+        "the signature must stay after the last piece: {out}"
+    );
+
+    let dir = common::repo_with(&[("f", "a\nb\nc\nd\ne\n")]);
+    common::apply_cached(&dir, out.as_bytes());
+}
+
+/// Re-emitting a diff whose every hunk is followed by a line must stay linear in the number of
+/// hunks. Scanning the whole trailer per hunk made it quadratic, and the cost is invisible on a
+/// small diff: it shows only at scale. Measured as a ratio between two sizes rather than against
+/// a wall-clock budget, so the test says the same thing on a fast laptop and a loaded runner —
+/// four times the input costs about four times as much when linear, sixteen when quadratic.
+#[test]
+fn emitting_trailing_lines_stays_linear_in_the_number_of_hunks() {
+    /// A diff of `hunks` one-line changes, each followed by a blank separator line.
+    fn diff_with_separators(hunks: usize) -> String {
+        let mut d = String::from("diff --git a/f b/f\n--- a/f\n+++ b/f\n");
+        for i in 0..hunks {
+            let base = i * 4 + 1;
+            d.push_str(&format!(
+                "@@ -{base},3 +{base},3 @@\n ctx{i}\n-old{i}\n+new{i}\n\n"
+            ));
+        }
+        d
+    }
+
+    fn split_duration(hunks: usize) -> std::time::Duration {
+        let diff = diff_with_separators(hunks);
+        let started = std::time::Instant::now();
+        let out = common::run_ok_text(&["split", "1", "--at", "1"], &diff);
+        let elapsed = started.elapsed();
+        assert_eq!(
+            out.matches("@@ -").count(),
+            hunks,
+            "every hunk must survive the split"
+        );
+        elapsed
+    }
+
+    const SMALL: usize = 8_000;
+    let small = split_duration(SMALL);
+    let large = split_duration(SMALL * 4);
+    let ratio = large.as_secs_f64() / small.as_secs_f64().max(f64::MIN_POSITIVE);
+    assert!(
+        ratio < 8.0,
+        "four times the hunks took {ratio:.1}x the time ({small:?} -> {large:?}); \
+         linear emission costs about 4x, quadratic about 16x"
+    );
+}
+
+/// The "input had no final newline" flag describes one specific line of the input — its last.
+/// A selection that does not end on that line must not inherit it: the line it does end on had
+/// a newline in the input, and dropping it truncates a line the caller never asked to change.
+#[test]
+fn a_selection_that_drops_the_last_line_still_ends_with_a_newline() {
+    let diff = concat!(
+        "diff --git a/f b/f\n",
+        "--- a/f\n",
+        "+++ b/f\n",
+        "@@ -1,5 +1,5 @@\n",
+        " a\n",
+        "-b\n",
+        "+B\n",
+        " c\n",
+        " d\n",
+        "-e\n",
+        "+E", // the input ends here, without a newline
+    );
+
+    let out = common::run_ok_text(&["select", "1"], diff);
+    assert!(
+        out.ends_with('\n'),
+        "the selected sub-hunk ends on a line the input terminated: {out:?}"
+    );
+
+    // Selecting the sub-hunk that does end on that line keeps the input byte-for-byte.
+    let out = common::run_ok_text(&["select", "2"], diff);
+    assert!(
+        !out.ends_with('\n'),
+        "the last sub-hunk does end on the unterminated line: {out:?}"
+    );
+}
+
+/// A hunk header hunkpick cannot represent must be refused, not quietly rewritten. Both forms
+/// below parsed as if the extra token were not there, and the emitted diff dropped bytes the
+/// input carried — with exit 0, against the byte-for-byte promise of `emit`.
+#[test]
+fn a_hunk_header_with_junk_is_a_parse_error() {
+    for header in ["@@ -1,3,9 +1,3 @@", "@@ -1,3 +1,3 junk @@ sect"] {
+        let diff = format!("diff --git a/f b/f\n--- a/f\n+++ b/f\n{header}\n a\n-b\n+B\n c\n",);
+        let out = Command::cargo_bin("hunkpick")
+            .unwrap()
+            .arg("list")
+            .write_stdin(diff)
+            .assert()
+            .code(2);
+        out.stderr(predicate::str::contains("hunk header"));
+    }
+}
+
+/// `list --json` is read line by line by shell pipelines (`| jq`, `| while read`), so its output
+/// has to end with a newline like every other stream of text this tool writes.
+#[test]
+fn json_listing_ends_with_a_newline() {
+    let diff = concat!(
+        "diff --git a/f b/f\n",
+        "--- a/f\n",
+        "+++ b/f\n",
+        "@@ -1 +1 @@\n",
+        "-old\n",
+        "+new\n",
+    );
+
+    let out = common::run_ok_text(&["list", "--json"], diff);
+    assert!(
+        out.ends_with("]\n"),
+        "json listing tail: {:?}",
+        &out[out.len().saturating_sub(8)..]
+    );
+}
+
+/// `--verify-result-diff-git` needs `git` on PATH. When it is absent the check never ran, so the
+/// result diff was not rejected — reporting exit 70 ("verification failed") blames hunkpick's
+/// output for a missing tool. That is an environment failure: exit 74, like any other I/O.
+#[test]
+#[cfg(unix)]
+fn a_missing_git_binary_is_not_a_verification_failure() {
+    let diff = concat!(
+        "diff --git a/f b/f\n",
+        "--- a/f\n",
+        "+++ b/f\n",
+        "@@ -1 +1 @@\n",
+        "-old\n",
+        "+new\n",
+    );
+
+    let assert = Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "1", "--verify-result-diff-git"])
+        .env("PATH", "/nonexistent")
+        .write_stdin(diff)
+        .assert()
+        .code(74);
+    assert.stderr(predicate::str::contains("git"));
+}
+
+/// A diff redirected to a file by Windows PowerShell 5.1 lands in UTF-16LE with a BOM. Every
+/// other byte is then NUL, so the binary-input guard fires and sends the reader looking for a
+/// binary file instead of at the encoding of their own patch.
+#[test]
+fn a_utf16_diff_is_diagnosed_as_an_encoding_problem() {
+    let text = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n";
+    let mut utf16 = vec![0xFF, 0xFE];
+    for unit in text.encode_utf16() {
+        utf16.extend_from_slice(&unit.to_le_bytes());
+    }
+
+    let assert = Command::cargo_bin("hunkpick")
+        .unwrap()
+        .arg("list")
+        .write_stdin(utf16)
+        .assert()
+        .code(2);
+    assert.stderr(predicate::str::contains("UTF-16"));
 }

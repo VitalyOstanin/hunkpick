@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -10,7 +10,11 @@ use hunkpick::error::AppError;
 use hunkpick::{emit, list, model, parser, select, split, validate};
 
 fn main() -> ExitCode {
-    match run() {
+    // The flush belongs here, not at the end of `run`: stdout is line-buffered, so whatever
+    // follows the last newline sits in the buffer until the runtime drops it at exit — and that
+    // flush discards its error. A full disk or a closed device would then truncate the output
+    // while the process reported success.
+    match run().and_then(|()| flush_out()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("hunkpick: {e}");
@@ -49,7 +53,10 @@ fn run_list(json: bool, color: ColorMode, input: &InputOpts) -> Result<(), AppEr
         list::list_human(&patch, use_color)
     };
     write_out(text.as_bytes())?;
-    if !json && !text.ends_with('\n') {
+    // Both forms end in a newline: the JSON document is a line of a stream as much as the human
+    // listing is, and a reader splitting on newlines (`| jq`, `while read`) would otherwise be
+    // handed a last line that never terminates.
+    if !text.ends_with('\n') {
         write_out(b"\n")?;
     }
     Ok(())
@@ -69,7 +76,7 @@ fn run_select(
 }
 
 fn run_split(
-    hunk: &str,
+    hunk: &OsStr,
     at: &[u32],
     input: &InputOpts,
     verify: &VerifyOpts,
@@ -80,12 +87,9 @@ fn run_split(
         return Ok(());
     };
     let (fi, hi) = select::resolve_hunk(&patch, hunk).map_err(usage)?;
-    // `resolve_hunk` already rejected binary files, so the target is always text.
-    let model::FileContent::Text(hunks) = &mut patch.files[fi].content else {
-        unreachable!("resolve_hunk guarantees a text file");
-    };
-    let pieces = split::split_hunk_at(&hunks[hi], at).map_err(usage)?;
-    hunks.splice(hi..=hi, pieces);
+    // `resolve_hunk` already rejected binary files, so the target is always text. The splice
+    // and the trailer bookkeeping it forces live together in `split_file_hunk`.
+    split::split_file_hunk(&mut patch.files[fi], hi, at).map_err(usage)?;
     // Same rule as `select`: the result owns its new-side anchors. A diff carved out
     // of a larger one keeps anchors describing a file this result does not produce,
     // and `git apply` searches from the new-side position (see `renumber`).
@@ -151,18 +155,48 @@ fn read_limited<R: Read>(r: R, limit: u64) -> Result<Vec<u8>, AppError> {
     Ok(buf)
 }
 
-/// Reject input that is clearly not a unified diff: binary data (a NUL byte) or text
-/// that has no diff marker line at all. Empty / whitespace input is handled by the caller.
+/// The encoding named by a leading byte-order mark, for the marks whose text hunkpick cannot
+/// read. A UTF-8 BOM is not one of them: it survives the round-trip in the preamble and git
+/// accepts the result, so it is left alone.
+fn utf16_or_32_bom(input: &[u8]) -> Option<&'static str> {
+    // UTF-32 first: its little-endian mark starts with the UTF-16LE one.
+    match input {
+        [0xFF, 0xFE, 0x00, 0x00, ..] => Some("UTF-32LE"),
+        [0x00, 0x00, 0xFE, 0xFF, ..] => Some("UTF-32BE"),
+        [0xFF, 0xFE, ..] => Some("UTF-16LE"),
+        [0xFE, 0xFF, ..] => Some("UTF-16BE"),
+        _ => None,
+    }
+}
+
+/// Reject input that is clearly not a unified diff: text in an encoding hunkpick does not read,
+/// binary data (a NUL byte), or text that has no diff marker line at all. Empty / whitespace
+/// input is handled by the caller.
 fn reject_non_diff(input: &[u8]) -> Result<(), AppError> {
+    // Checked before the NUL guard: a UTF-16 diff is ASCII interleaved with NUL bytes, so the
+    // guard would fire first and send the reader looking for a binary file. `git diff > x.diff`
+    // in Windows PowerShell 5.1 writes exactly that. Re-encoding it here is not an option —
+    // the diff is passed through byte for byte (ADR 0005) — so say what to fix.
+    if let Some(encoding) = utf16_or_32_bom(input) {
+        return Err(AppError::Usage(format!(
+            "input starts with a {encoding} byte-order mark; hunkpick reads a UTF-8 (or any \
+             ASCII-compatible) byte stream — re-encode the diff, e.g. `iconv -f {encoding} -t \
+             UTF-8`"
+        )));
+    }
     if input.contains(&0) {
         return Err(AppError::Usage(
             "binary input: NUL byte found, expected a unified diff".into(),
         ));
     }
     const MARKERS: [&[u8]; 5] = [b"diff --git ", b"--- ", b"+++ ", b"@@ ", b"Binary files "];
-    let has_marker = input
-        .split(|&b| b == b'\n')
-        .any(|line| MARKERS.iter().any(|m| line.starts_with(m)));
+    // A combined diff counts as a marker here so the parser gets to reject it by name. Its
+    // `---`/`+++` pair is omitted for a file resolved the same way in both parents, and without
+    // this the guard would report "no diff markers found" — which points at the pipe rather
+    // than at the format.
+    let has_marker = input.split(|&b| b == b'\n').any(|line| {
+        MARKERS.iter().any(|m| line.starts_with(m)) || hunkpick::parser::is_combined_marker(line)
+    });
     if !has_marker {
         return Err(AppError::Usage(
             "input does not look like a unified diff (no diff markers found)".into(),
@@ -182,6 +216,16 @@ fn write_out(bytes: &[u8]) -> Result<(), AppError> {
     }
 }
 
+/// Push out what line buffering held back, classifying a failure the way `write_out` does: a
+/// reader that left is a normal end, anything else is an I/O error the caller must see.
+fn flush_out() -> Result<(), AppError> {
+    match std::io::stdout().flush() {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(AppError::Io(e.to_string())),
+    }
+}
+
 fn usage<E: std::fmt::Display>(e: E) -> AppError {
     AppError::Usage(format!("{e}"))
 }
@@ -195,7 +239,16 @@ fn emit_verified(out: &model::Patch, verify: &VerifyOpts) -> Result<(), AppError
     let bytes = emit::emit(out);
     if verify.verify_result_diff_git {
         let dir = verify.dir.clone().unwrap_or_else(|| PathBuf::from("."));
-        validate::validate_with_git(&bytes, &dir).map_err(AppError::Verify)?;
+        // Only a verdict from git says anything about the result diff. A git that would not
+        // start, or a failure while talking to it, means the check never happened — reporting
+        // that as exit 70 would blame the output for a broken environment.
+        validate::validate_with_git(&bytes, &dir).map_err(|e| match e {
+            validate::GitCheckError::Rejected(_) => AppError::Verify(e.to_string()),
+            validate::GitCheckError::WriterPanicked => AppError::Internal(e.to_string()),
+            validate::GitCheckError::Spawn(_) | validate::GitCheckError::Io(_) => {
+                AppError::Io(e.to_string())
+            }
+        })?;
     }
     write_out(&bytes)
 }

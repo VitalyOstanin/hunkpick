@@ -5,6 +5,24 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+/// Which side of a hunk header a count belongs to.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Side {
+    /// The `-` side: context and deleted lines.
+    Old,
+    /// The `+` side: context and added lines.
+    New,
+}
+
+impl fmt::Display for Side {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Side::Old => "old",
+            Side::New => "new",
+        })
+    }
+}
+
 /// A diff that does not add up. `hunk_index` is 0-based internally; [`fmt::Display`] renders it
 /// 1-based, as `list` and the selectors number sub-hunks.
 #[derive(Debug, PartialEq, Eq)]
@@ -15,8 +33,8 @@ pub enum ValidationError {
         file: String,
         /// 0-based position of the hunk within that file.
         hunk_index: usize,
-        /// Which count disagrees: `"old_lines"` or `"new_lines"`.
-        field: &'static str,
+        /// Which side's count disagrees.
+        side: Side,
         /// The value the `@@` header declares.
         header: u32,
         /// The value the body actually holds.
@@ -71,11 +89,10 @@ impl fmt::Display for ValidationError {
             ValidationError::CountMismatch {
                 file,
                 hunk_index,
-                field,
+                side,
                 header,
                 body,
             } => {
-                let side = if *field == "old_lines" { "old" } else { "new" };
                 write!(
                     f,
                     "{file}: sub-hunk {}: header declares {header} {side} lines, body has {body}",
@@ -195,7 +212,7 @@ fn check_one_hunk(
         return Err(ValidationError::CountMismatch {
             file: path.to_string(),
             hunk_index: index,
-            field: "old_lines",
+            side: Side::Old,
             header: h.old_lines,
             body: ctx + del,
         });
@@ -204,7 +221,7 @@ fn check_one_hunk(
         return Err(ValidationError::CountMismatch {
             file: path.to_string(),
             hunk_index: index,
-            field: "new_lines",
+            side: Side::New,
             header: h.new_lines,
             body: ctx + add,
         });
@@ -225,9 +242,41 @@ fn check_one_hunk(
     Ok((add, del))
 }
 
+/// Why a `git apply --check` run did not end in a verdict of "applies".
+///
+/// The distinction the caller needs is between *the result diff is bad* and *the check could not
+/// be made*: only the first says anything about hunkpick's output. Merging them into one string
+/// reported a missing `git` as a rejected diff.
+#[derive(Debug)]
+pub enum GitCheckError {
+    /// `git` could not be started — absent from `PATH`, not executable, no fork available.
+    Spawn(std::io::Error),
+    /// Feeding the diff to git, or collecting its output, failed.
+    Io(std::io::Error),
+    /// The thread writing the diff to git's stdin panicked.
+    WriterPanicked,
+    /// git ran and refused the diff. Carries its stderr.
+    Rejected(String),
+}
+
+impl fmt::Display for GitCheckError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GitCheckError::Spawn(e) => write!(f, "failed to run git: {e}"),
+            GitCheckError::Io(e) => write!(f, "git check failed: {e}"),
+            GitCheckError::WriterPanicked => write!(f, "the thread feeding git panicked"),
+            GitCheckError::Rejected(stderr) => {
+                write!(f, "git apply --check rejected the result diff: {stderr}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GitCheckError {}
+
 /// Run `git apply --check` against the working tree in `dir`, feeding `diff_bytes` on stdin.
-/// Returns Err with git's stderr on failure (or if git could not be run).
-pub fn validate_with_git(diff_bytes: &[u8], dir: &Path) -> Result<(), String> {
+/// Returns Err with git's verdict, or with the reason the check could not be made.
+pub fn validate_with_git(diff_bytes: &[u8], dir: &Path) -> Result<(), GitCheckError> {
     let mut cmd = Command::new("git");
     cmd.arg("apply")
         .arg("--check")
@@ -240,17 +289,8 @@ pub fn validate_with_git(diff_bytes: &[u8], dir: &Path) -> Result<(), String> {
     // git 2.53.0). They do decide the repository once the index is involved, and they arrive
     // set from hooks, `git rebase --exec` and editor integrations — dropping them keeps
     // `-C DIR` the only thing that selects the repository whatever flags are added later.
-    for var in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_COMMON_DIR",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    ] {
-        cmd.env_remove(var);
-    }
-    let mut child = cmd.spawn().map_err(|e| format!("failed to run git: {e}"))?;
+    crate::gitenv::insulate_repo_location(&mut cmd);
+    let mut child = cmd.spawn().map_err(GitCheckError::Spawn)?;
     // Feed stdin from a separate thread while this one drains stdout/stderr. Writing the whole
     // diff first would deadlock if git filled its stderr pipe (typically 64 KiB) before reading
     // the patch to the end — plausible on a large diff that git rejects hunk by hunk.
@@ -267,20 +307,17 @@ pub fn validate_with_git(diff_bytes: &[u8], dir: &Path) -> Result<(), String> {
         // A closed pipe means git stopped reading (it rejected the patch early); its exit
         // status and stderr below carry the real diagnosis, so this is not the error to report.
         Ok(Err(e)) if e.kind() != std::io::ErrorKind::BrokenPipe => {
-            return Err(format!("failed to write to git: {e}"));
+            return Err(GitCheckError::Io(e));
         }
-        Err(_) => return Err("the thread feeding git panicked".to_string()),
+        Err(_) => return Err(GitCheckError::WriterPanicked),
         _ => {}
     }
-    let output = output.map_err(|e| format!("git wait failed: {e}"))?;
+    let output = output.map_err(GitCheckError::Io)?;
     if output.status.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!(
-            "git apply --check rejected the result diff: {}",
-            stderr.trim()
-        ))
+        Err(GitCheckError::Rejected(stderr.trim().to_string()))
     }
 }
 

@@ -119,6 +119,41 @@ pub fn split_hunk_at(h: &Hunk, new_line_cuts: &[u32]) -> Result<Vec<Hunk>, Split
     Ok(rebuild_pieces(h, &starts, &ends))
 }
 
+/// Replace hunk `hi` of `f` with the pieces `--at` asks for, keeping the lines recorded after a
+/// hunk attached to the hunk they follow.
+///
+/// Splitting one hunk into `n` pieces moves every later hunk down by `n - 1`, and the lines
+/// [`FileDiff::trailer`] holds must move with them: a line left at its old position is emitted
+/// between the pieces, where `git apply` reads it as a patch fragment without a header — while
+/// hunkpick, which checks hunk bodies and not the lines between them, still reports success.
+/// Lines recorded right after the split hunk follow its last piece.
+///
+/// Returns how many pieces the hunk became. Errors exactly as [`split_hunk_at`]. Panics if the
+/// file is binary or `hi` is out of range; callers resolve the address first
+/// (`select::resolve_hunk`), which rejects both.
+pub fn split_file_hunk(
+    f: &mut FileDiff,
+    hi: usize,
+    new_line_cuts: &[u32],
+) -> Result<usize, SplitError> {
+    let FileContent::Text(hunks) = &mut f.content else {
+        unreachable!("split_file_hunk is only called for text files");
+    };
+    let pieces = split_hunk_at(&hunks[hi], new_line_cuts)?;
+    let n = pieces.len();
+    hunks.splice(hi..=hi, pieces);
+    // A trailer entry counts the hunks before its line, so `at > hi` covers both the lines that
+    // follow the split hunk itself (`at == hi + 1`) and those after any later hunk. Written as
+    // `at + n - 1` rather than `at - 1 + n` so the sum is formed before the decrement: `n` is
+    // zero when every piece was degenerate, and `at` is at least 1 here.
+    for (at, _) in &mut f.trailer {
+        if *at > hi {
+            *at = *at + n - 1;
+        }
+    }
+    Ok(n)
+}
+
 /// Emit a piece of `h` that realises only the selected changed lines. `selected` holds 1-based
 /// indices over `h`'s changed (Add/Del) lines in body order (`1..=changed`, where
 /// `changed == added + deleted`). Each body line is rewritten:
@@ -756,6 +791,46 @@ diff --git a/f b/f
         assert!(
             git_apply_ok(&[p], "a"),
             "addition piece must apply to `a` (no trailing newline)"
+        );
+    }
+
+    /// Splitting the first of two hunks moves the second one down, and every line recorded
+    /// after a hunk has to move with it: a blank separator between the hunks belongs after the
+    /// split hunk's last piece, and the file's signature stays after the final hunk.
+    #[test]
+    fn split_file_hunk_moves_trailing_lines_with_their_hunks() {
+        let p = parse(
+            concat!(
+                "diff --git a/f b/f\n--- a/f\n+++ b/f\n",
+                "@@ -1,5 +1,5 @@\n a\n-b\n+B\n c\n-d\n+D\n e\n",
+                "\n",
+                "@@ -20,3 +20,3 @@\n p\n-q\n+Q\n r\n",
+                "-- \n2.53.0\n",
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let mut f = p.files[0].clone();
+        assert_eq!(
+            f.trailer,
+            vec![
+                (1, b"".to_vec()),
+                (2, b"-- ".to_vec()),
+                (2, b"2.53.0".to_vec())
+            ],
+            "positions before the split"
+        );
+
+        // New-file line numbers of the first hunk: a=1 B=2 c=3 D=4 e=5. Cut at context line 3.
+        assert_eq!(split_file_hunk(&mut f, 0, &[3]).unwrap(), 2);
+        assert_eq!(
+            f.trailer,
+            vec![
+                (2, b"".to_vec()),
+                (3, b"-- ".to_vec()),
+                (3, b"2.53.0".to_vec())
+            ],
+            "each line follows the hunk it followed before the split"
         );
     }
 

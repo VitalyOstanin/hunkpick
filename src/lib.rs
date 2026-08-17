@@ -55,6 +55,8 @@ pub mod cli;
 pub mod emit;
 /// Application errors and the process exit codes they map to.
 pub mod error;
+/// The environment variables that decide which repository a `git` child acts on.
+pub mod gitenv;
 #[cfg(test)]
 mod gittest;
 /// Enumerate the addressable sub-hunks of a patch, human-readable or as JSON.

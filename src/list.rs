@@ -95,6 +95,14 @@ fn preview(h: &Hunk) -> String {
 
 /// The addressable sub-hunks of `patch` as pretty-printed JSON: an array of files, each with
 /// its sub-hunks (1-based `index`, content `id`, `id_count`, line ranges, changed lines).
+///
+/// Text fields (`path`, `header`, `preview`, `changed_lines[].text`) report the diff's own
+/// content and are deliberately not display-sanitised the way [`list_human`] sanitises its
+/// output: JSON escaping hides control characters but not bidirectional overrides, which come
+/// back out of a parser unchanged. A consumer that prints these fields to a terminal must
+/// escape them itself. They are also lossy for bytes that are not valid UTF-8 (JSON must be
+/// UTF-8), so a path read from here does not necessarily round-trip into a `path:N` selector —
+/// the content `id` is the exact handle for such a file.
 pub fn list_json(patch: &Patch) -> String {
     let view = build_view(patch);
     // Hash each sub-hunk once, keeping the per-file hashes alongside the view so the second
@@ -235,7 +243,6 @@ pub fn list_human(patch: &Patch, color: bool) -> String {
 mod tests {
     use super::*;
     use crate::parser::parse;
-    use crate::select::build_view;
 
     /// In a CRLF diff the header's trailing CR is the line ending, not section text. `emit`
     /// already knows that; the listing must agree, or it prints a separating space and a raw

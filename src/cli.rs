@@ -103,7 +103,14 @@ pub struct VerifyOpts {
     /// Disable the default internal consistency check of the result diff.
     #[arg(long)]
     pub no_verify_result_diff_internal: bool,
-    /// Additionally verify the result diff applies via `git apply --check`.
+    /// Additionally check the result with `git apply --check` against the WORKING TREE.
+    ///
+    /// Expert option. `git apply --check` reads the working tree, so it answers "does this
+    /// diff apply to the files as they are on disk right now". In the usual staging pipeline
+    /// (`git diff | hunkpick select ... | git apply --cached`) the working tree already holds
+    /// those edits, so a correct result diff is reported as not applying (exit 70). Use it
+    /// when the tree is at the state the diff is meant for -- reviewing a patch file, or with
+    /// `-C DIR` pointing at such a tree -- not as a routine check of the staging loop.
     #[arg(long)]
     pub verify_result_diff_git: bool,
     /// Working tree directory for the git verification (default: current dir).
@@ -140,6 +147,11 @@ pub enum Command {
     /// many sub-hunks share an id; 1 = unique), `addition_only` (that same all-additions flag),
     /// and `changed_lines` (each sub-hunk's +/- lines, 1-based in body order, for addressing
     /// with `select INDEX@L<set>`). Binary files are listed with no sub-hunks.
+    ///
+    /// The human listing escapes text a terminal would act on (escape sequences, control
+    /// bytes, bidirectional overrides). The JSON listing does not: its text fields carry the
+    /// diff's own content, so a consumer printing them to a terminal must escape them. Those
+    /// fields are also lossy for non-UTF-8 bytes; address such a file by its content id.
     List {
         /// Emit machine-readable JSON instead of the human listing.
         #[arg(long)]
@@ -174,11 +186,14 @@ pub enum Command {
         /// then @ID, then a bare set.
         ///
         /// In INDEX@L<set> only a numeric index may precede '@' (not @id, not *), and the set
-        /// numbers the sub-hunk's changed lines 1..N in body order — deletions and additions
-        /// share one numbering, as shown by `list --json`'s changed_lines. Every subset applies:
-        /// the cut keeps both leading and trailing context. Address a sub-hunk by @L once per
-        /// invocation (do not combine it with another selection of the same sub-hunk); stage
-        /// further pieces in later rounds.
+        /// numbers the sub-hunk's changed lines 1..N in body order: deletions and additions
+        /// share one numbering, as shown by `list --json`'s changed_lines. The cut keeps both
+        /// leading and trailing context, so a subset applies with no boundary restriction,
+        /// except on an entry that deletes the file (+++ /dev/null), where a partial subset is
+        /// a usage error, and for a piece left with no context at all (whole-file replacement,
+        /// file creation/deletion), which git applies only with --unidiff-zero. Address a
+        /// sub-hunk by @L once per invocation (do not combine it with another selection of the
+        /// same sub-hunk); stage further pieces in later rounds.
         ///
         /// The README is the reference for the grammar, with worked examples of splitting a
         /// block across commits and separating a replacement's removals from its insertions.
@@ -201,8 +216,9 @@ pub enum Command {
     /// neither `*` nor `@id` is accepted.
     Split {
         /// Hunk address: `path:N` or `N` (single-file input). N indexes the file's ORIGINAL
-        /// hunks (before auto-split), not the sub-hunk indices shown by `list`.
-        hunk: String,
+        /// hunks (before auto-split), not the sub-hunk indices shown by `list`. Taken as raw
+        /// bytes, like a selector, so a path that is not valid UTF-8 can be spelled.
+        hunk: OsString,
         /// New-file line numbers to cut at.
         #[arg(long = "at", value_delimiter = ',', required = true)]
         at: Vec<u32>,
@@ -349,5 +365,27 @@ mod tests {
             help.contains("1@L1-90"),
             "long help must show an @L changed-line example"
         );
+    }
+
+    /// Every help text this binary can print stays ASCII. Rust writes stdout as UTF-8, and a
+    /// Windows console on a non-UTF-8 code page (cp866/cp1251 are the defaults in several
+    /// locales) renders anything else as mojibake in the middle of the help — and the release
+    /// pipeline ships an x86_64-pc-windows-msvc binary. Typographic punctuation is the way
+    /// this creeps in, so the guard is a test rather than a review habit.
+    #[test]
+    fn every_help_text_is_ascii() {
+        let mut cmd = Cli::command();
+        let mut texts = vec![cmd.render_long_help().to_string()];
+        for sub in cmd.get_subcommands_mut() {
+            texts.push(sub.render_long_help().to_string());
+        }
+        for help in texts {
+            let offender = help.chars().find(|c| !c.is_ascii());
+            assert!(
+                offender.is_none(),
+                "help text contains a non-ASCII character {:?}; use ASCII punctuation",
+                offender.unwrap()
+            );
+        }
     }
 }
