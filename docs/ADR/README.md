@@ -17,6 +17,7 @@ added as a new ADR that supersedes the earlier one rather than editing it in pla
 | [0008](0008-added-line-range-addressing.md)        | Added-line range addressing (`INDEX@RANGE`) in `select`          | Superseded by 0009 | 2026-06-24 |
 | [0009](0009-changed-line-addressing-supersedes-range.md) | Changed-line addressing (`INDEX@L<set>`) supersedes and removes `INDEX@RANGE` | Accepted | 2026-07-11 |
 | [0010](0010-result-diff-owns-its-new-side-anchors.md) | The result diff owns its new-side anchors                             | Accepted | 2026-07-29 |
+| [0011](0011-rust-2024-edition.md)              | Rust 2024 edition, including its style edition                        | Accepted | 2026-08-17 |
 
 ## Adding a new ADR
 

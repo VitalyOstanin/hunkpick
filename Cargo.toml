@@ -1,7 +1,7 @@
 [package]
 name = "hunkpick"
 version = "0.7.0"
-edition = "2021"
+edition = "2024"
 rust-version = "1.85"
 authors = ["Vitaly Ostanin <vitaly.ostanin@gmail.com>"]
 description = "Non-interactive git add -p alternative — pick and split unified-diff hunks by index, range, or content id"

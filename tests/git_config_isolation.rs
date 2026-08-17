@@ -19,7 +19,10 @@ fn ambient_global_git_config_does_not_reach_the_test_repositories() {
     )
     .unwrap();
     // Inherited by every git process the helpers spawn unless they suppress it.
-    std::env::set_var("GIT_CONFIG_GLOBAL", cfg.path());
+    //
+    // SAFETY: the file-level comment keeps this binary at a single test, so no other thread can
+    // read the environment while it is being written.
+    unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", cfg.path()) };
 
     let dir = common::repo_with(&[("f", "a\nb\nc\n")]);
     let diff = common::diff_after(&dir, &[("f", "a\nB\nc\n")]);
