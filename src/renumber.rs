@@ -1,13 +1,10 @@
 //! New-side (`+`) line numbers of a result diff.
 //!
-//! In a unified diff a hunk's new-side start is not an independent fact: it follows from the
-//! old-side start plus the net size of everything the *same diff* already changed above it.
-//! Dropping a sub-hunk therefore invalidates every later new-side anchor carried over from the
-//! input — the kept part adds or removes a different number of lines than the full diff did.
-//!
-//! `git apply` starts its search for a hunk at the new-side position, so a stale anchor is not
-//! cosmetic: it drifts the search and, when the surrounding context occurs more than once, the
-//! change lands in the wrong place (or the patch is rejected).
+//! A hunk's new-side start follows from its old-side start plus the net size of everything the
+//! same diff already changed above it, so dropping a sub-hunk invalidates every later anchor
+//! carried over from the input. `git apply` searches from that position, so a stale anchor
+//! misplaces the change rather than merely looking wrong. Why the result recomputes them
+//! instead of trusting the input: `docs/ADR/0010-result-diff-owns-new-side-anchors.md`.
 //!
 //! [`renumber_new_side`] recomputes the anchors from the result alone;
 //! [`expected_new_start`] is the same arithmetic exposed for the consistency check in

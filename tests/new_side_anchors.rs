@@ -8,21 +8,7 @@
 
 mod common;
 
-use assert_cmd::Command;
-
-/// Run hunkpick, assert success, return stdout as text.
-fn run_ok(args: &[&str], stdin: &str) -> String {
-    let out = Command::cargo_bin("hunkpick")
-        .unwrap()
-        .args(args)
-        .write_stdin(stdin.to_string())
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    String::from_utf8(out).unwrap()
-}
+use common::run_ok_text as run_ok;
 
 /// The `@@` header lines of a diff, in order.
 fn headers(diff: &str) -> Vec<String> {

@@ -4,12 +4,19 @@ use crate::split::auto_split_hunk;
 use crate::split::slice_changed_lines;
 use crate::subhunk_id::subhunk_hash;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fmt;
 
+/// One parsed selector argument.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Selector {
+    /// Address sub-hunks within one file (the `path:set` and bare-`set` forms).
     File {
-        path: Option<String>,
+        /// Path as the user wrote it, or `None` for the bare form (resolved against a
+        /// single-file diff later). Raw bytes, because a diff can name a file whose path is
+        /// not valid UTF-8 and the selector has to be able to spell it.
+        path: Option<Vec<u8>>,
+        /// Which sub-hunks of that file are addressed.
         indices: IndexSet,
     },
     /// Address sub-hunks by their content id (the `@<id>` form). Matches every sub-hunk in the
@@ -21,28 +28,38 @@ pub enum Selector {
 /// meaning every sub-hunk of the addressed file.
 #[derive(Debug, PartialEq, Eq)]
 pub enum IndexSet {
+    /// `*`: every sub-hunk of the addressed file (and the entry itself when it has none).
     All,
+    /// An explicit list of 1-based sub-hunk indices, ranges already expanded.
     List(Vec<usize>),
     /// `INDEX@L<set>`: one sub-hunk cut to an arbitrary subset of its changed (`+`/`-`) lines,
     /// numbered `1..=changed` in body order. Any subset is realisable (a deletion split by
     /// additions, a replacement's removals separated from its insertions).
     LineSet {
+        /// 1-based index of the sub-hunk being cut.
         index: usize,
+        /// 1-based indices over that sub-hunk's changed lines, ranges already expanded.
         lines: Vec<usize>,
     },
 }
 
+/// Why a selection could not be made. Every variant is a usage error (exit code 2).
 #[derive(Debug, PartialEq, Eq)]
 pub enum SelectError {
+    /// A selector argument does not parse. Carries the argument and the specific reason.
     BadSelector(String),
+    /// A `path:` selector names a file the diff does not contain.
     UnknownPath(String),
+    /// A `path:` selector matches more than one file of the diff.
     AmbiguousPath(String),
+    /// An index addresses a sub-hunk the file does not have. Carries `path:index`.
     NoIndex(String),
     /// An `@<id>` selector matched no sub-hunk in the patch.
     UnknownId(String),
     /// An `@<id>` selector matched sub-hunks with differing content (an accidental hash
     /// collision between distinct changes). Carries the colliding id.
     IdCollision(String),
+    /// No selector was given, so nothing would be emitted.
     EmptySelection,
     /// A selector used the removed `INDEX@lo-hi` added-line range form. Carries the offending
     /// selector so the message can point the caller at the `@L` replacement.
@@ -75,6 +92,10 @@ impl fmt::Display for SelectError {
     }
 }
 
+/// Lets callers treat it as a boxed [`std::error::Error`], as the Rust API guidelines ask
+/// of a public error type.
+impl std::error::Error for SelectError {}
+
 /// Auto-split one file's hunks into its ordered sub-hunks (empty for a binary file).
 pub fn build_file_subs(f: &FileDiff) -> Vec<Hunk> {
     match &f.content {
@@ -91,14 +112,10 @@ pub fn build_file_subs(f: &FileDiff) -> Vec<Hunk> {
     }
 }
 
-/// Per-file auto-split view: each file maps to its ordered sub-hunks (empty for binary).
-pub fn build_view(patch: &Patch) -> Vec<(usize, Vec<Hunk>)> {
-    patch
-        .files
-        .iter()
-        .enumerate()
-        .map(|(fi, f)| (fi, build_file_subs(f)))
-        .collect()
+/// Per-file auto-split view: entry `i` holds the ordered sub-hunks of `patch.files[i]`
+/// (empty for a binary file), so a position in the result is the file index.
+pub fn build_view(patch: &Patch) -> Vec<Vec<Hunk>> {
+    patch.files.iter().map(build_file_subs).collect()
 }
 
 /// Parse selector args. Forms, in order of precedence:
@@ -109,36 +126,27 @@ pub fn build_view(patch: &Patch) -> Vec<(usize, Vec<Hunk>)> {
 /// 2. `@id` — address sub-hunks by content id (a non-empty hex string; the leading `@` is
 ///    only the id form when the rest is all hex digits).
 /// 3. bare `set` — `*` or an index list, for single-file diffs (the path is resolved later).
-pub fn parse_selectors(args: &[String]) -> Result<Vec<Selector>, SelectError> {
+pub fn parse_selectors<S: AsRef<OsStr>>(args: &[S]) -> Result<Vec<Selector>, SelectError> {
     let mut out = Vec::new();
-    for a in args {
+    for arg in args {
+        let bytes = os_bytes(arg.as_ref());
+        // A path that is not valid UTF-8 can only be the `path:set` form: everything else in
+        // the grammar is ASCII. Handle it on bytes and skip the textual forms below.
+        let Ok(a) = std::str::from_utf8(&bytes) else {
+            out.push(parse_binary_path_form(&bytes)?);
+            continue;
+        };
         // 1. path:set form. Checked first so a file named "@foo" (addressed "@foo:1") and a
         //    path containing ':' are not misread as an id or a bare set.
-        if let Some((p, l)) = a.rsplit_once(':') {
-            if !p.is_empty() {
-                match parse_index_set(l) {
-                    Ok(indices) => {
-                        out.push(Selector::File {
-                            path: Some(p.to_string()),
-                            indices,
-                        });
-                        continue;
-                    }
-                    // The removed `@lo-hi` form is unambiguous — surface it here rather than
-                    // letting the arg fall through to be reported as a generic bad selector.
-                    Err(SetParseError::RemovedRange) => {
-                        return Err(SelectError::RemovedRangeForm(a.clone()));
-                    }
-                    // Any other parse failure only means "not the path:set form"; fall through.
-                    Err(_) => {}
-                }
-            }
+        if let Some(sel) = parse_path_form(a)? {
+            out.push(sel);
+            continue;
         }
         // 2. @id form. The id must be a non-empty hex string; any other character (including
         //    a second '@') is not a valid id character and is rejected as a bad selector.
         if let Some(id) = a.strip_prefix('@') {
             if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(SelectError::BadSelector(a.clone()));
+                return Err(SelectError::BadSelector(a.to_string()));
             }
             out.push(Selector::Id(id.to_string()));
             continue;
@@ -146,7 +154,7 @@ pub fn parse_selectors(args: &[String]) -> Result<Vec<Selector>, SelectError> {
         // 3. bare set. A parse failure here is terminal (unlike the path form above), so the
         //    specific reason is surfaced to the user rather than discarded.
         let indices = parse_index_set(a).map_err(|e| match e {
-            SetParseError::RemovedRange => SelectError::RemovedRangeForm(a.clone()),
+            SetParseError::RemovedRange => SelectError::RemovedRangeForm(a.to_string()),
             e => SelectError::BadSelector(format!("{a} ({e})")),
         })?;
         out.push(Selector::File {
@@ -155,6 +163,86 @@ pub fn parse_selectors(args: &[String]) -> Result<Vec<Selector>, SelectError> {
         });
     }
     Ok(out)
+}
+
+/// Read `arg` as the `path:set` form. `Ok(None)` means it is not that form and the caller is to
+/// try the remaining ones; an `Err` means it is that form and the set inside it is broken.
+fn parse_path_form(arg: &str) -> Result<Option<Selector>, SelectError> {
+    let Some((path, set)) = arg.rsplit_once(':') else {
+        return Ok(None);
+    };
+    if path.is_empty() {
+        return Ok(None);
+    }
+    match parse_index_set(set) {
+        Ok(indices) => Ok(Some(Selector::File {
+            path: Some(path.as_bytes().to_vec()),
+            indices,
+        })),
+        // The removed `@lo-hi` form is unambiguous — surface it here rather than letting the
+        // arg fall through to be reported as a generic bad selector.
+        Err(SetParseError::RemovedRange) => Err(SelectError::RemovedRangeForm(arg.to_string())),
+        // A failure here is ambiguous: the text after the last ':' may be part of the path
+        // rather than a set. Only when it is built exclusively from set characters is it
+        // certainly meant as a set, and then its reason is the real one — otherwise report no
+        // match and let the arg be re-read as a whole.
+        Err(e) if looks_like_index_set(set) => {
+            Err(SelectError::BadSelector(format!("{arg} ({e})")))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+/// The bytes of a command-line argument. On Unix an argument is an arbitrary byte string, which
+/// is what a path in a diff can be; elsewhere the platform guarantees valid Unicode, so the
+/// lossy conversion never actually loses anything.
+fn os_bytes(arg: &OsStr) -> std::borrow::Cow<'_, [u8]> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        std::borrow::Cow::Borrowed(arg.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        match arg.to_string_lossy() {
+            std::borrow::Cow::Borrowed(s) => std::borrow::Cow::Borrowed(s.as_bytes()),
+            std::borrow::Cow::Owned(s) => std::borrow::Cow::Owned(s.into_bytes()),
+        }
+    }
+}
+
+/// Read a selector whose bytes are not valid UTF-8. Only `path:set` can look like that — the
+/// rest of the grammar is ASCII — so the path is taken verbatim and only the set after the
+/// last ':' is parsed as text.
+fn parse_binary_path_form(bytes: &[u8]) -> Result<Selector, SelectError> {
+    let shown = String::from_utf8_lossy(bytes).into_owned();
+    let Some(colon) = bytes.iter().rposition(|&b| b == b':') else {
+        return Err(SelectError::BadSelector(format!(
+            "{shown} (not valid UTF-8; only a path:set selector may hold such bytes)"
+        )));
+    };
+    let (path, set) = (&bytes[..colon], &bytes[colon + 1..]);
+    let Ok(set) = std::str::from_utf8(set) else {
+        return Err(SelectError::BadSelector(format!(
+            "{shown} (the set after ':' must be ASCII)"
+        )));
+    };
+    let indices = parse_index_set(set).map_err(|e| match e {
+        SetParseError::RemovedRange => SelectError::RemovedRangeForm(shown.clone()),
+        e => SelectError::BadSelector(format!("{shown} ({e})")),
+    })?;
+    Ok(Selector::File {
+        path: Some(path.to_vec()),
+        indices,
+    })
+}
+
+/// Whether `s` is spelled entirely from the characters an index set is made of, so a parse
+/// failure is a fault of the set rather than a sign that the text belongs to the path.
+fn looks_like_index_set(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, ',' | '-' | '*' | '@' | 'L' | 'l'))
 }
 
 /// Why an index-set selector failed to parse. Carried up so the CLI can report the specific
@@ -309,17 +397,23 @@ impl Chosen {
 
 /// The name to show for a file in an error message: the path as the user wrote it, or the
 /// diff's own display path when the selector carried no explicit path (a single-file diff).
-fn display_name(patch: &Patch, fi: usize, path: &Option<String>) -> String {
-    path.clone()
+fn display_name(patch: &Patch, fi: usize, path: Option<&[u8]>) -> String {
+    path.map(|p| String::from_utf8_lossy(p).into_owned())
         .unwrap_or_else(|| patch.files[fi].display_path())
 }
 
+/// Build the result patch: resolve `selectors` against `patch`, cut or clone the addressed
+/// sub-hunks, and recompute the new-side anchors so the result stands on its own.
 pub fn select(patch: &Patch, selectors: &[Selector]) -> Result<Patch, SelectError> {
     // Auto-split lazily, only for files a selector actually names, and cache by file index so
     // each referenced file is split once (selectors may target the same file repeatedly). The
     // cache is shared between the resolution and emission phases below.
     let mut subs_cache: BTreeMap<usize, Vec<Hunk>> = BTreeMap::new();
-    let chosen = resolve_selectors(patch, selectors, &mut subs_cache)?;
+    // Content hashes per file, filled by the first `@id` selector and reused by the rest:
+    // hashing is what makes an `@id` scan the whole patch, and several ids in one invocation
+    // is the documented workflow.
+    let mut hash_cache: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
+    let chosen = resolve_selectors(patch, selectors, &mut subs_cache, &mut hash_cache)?;
     if chosen.is_empty() {
         return Err(SelectError::EmptySelection);
     }
@@ -339,65 +433,129 @@ fn resolve_selectors(
     patch: &Patch,
     selectors: &[Selector],
     subs_cache: &mut BTreeMap<usize, Vec<Hunk>>,
+    hash_cache: &mut BTreeMap<usize, Vec<u64>>,
 ) -> Result<BTreeMap<usize, Vec<Chosen>>, SelectError> {
     let mut chosen: BTreeMap<usize, Vec<Chosen>> = BTreeMap::new();
     for sel in selectors {
         match sel {
-            Selector::Id(id) => resolve_id(patch, id, subs_cache, &mut chosen)?,
+            Selector::Id(id) => resolve_id(patch, id, subs_cache, hash_cache, &mut chosen)?,
             Selector::File { path, indices } => {
-                let fi = resolve_file(patch, path.as_deref())?;
-                // A binary file has no sub-hunks; a non-line-set selector picks the whole binary
-                // change. A line-set selector makes no sense for a binary file.
-                if matches!(patch.files[fi].content, FileContent::Binary(_)) {
-                    if let IndexSet::LineSet { .. } = indices {
-                        return Err(SelectError::LineSelect(format!(
-                            "{} is a binary file",
-                            patch.files[fi].display_path()
-                        )));
-                    }
-                    chosen.entry(fi).or_default();
-                    continue;
-                }
-                let subs = subs_cache
-                    .entry(fi)
-                    .or_insert_with(|| build_file_subs(&patch.files[fi]));
-                match indices {
-                    IndexSet::All => {
-                        for i in 1..=subs.len() {
-                            chosen.entry(fi).or_default().push(Chosen::Whole(i));
-                        }
-                    }
-                    IndexSet::List(v) => {
-                        for &idx in v {
-                            if idx > subs.len() {
-                                return Err(SelectError::NoIndex(format!(
-                                    "{}:{idx}",
-                                    display_name(patch, fi, path)
-                                )));
-                            }
-                            chosen.entry(fi).or_default().push(Chosen::Whole(idx));
-                        }
-                    }
-                    IndexSet::LineSet { index, lines } => {
-                        if *index > subs.len() {
-                            return Err(SelectError::NoIndex(format!(
-                                "{}:{index}",
-                                display_name(patch, fi, path)
-                            )));
-                        }
-                        // The concrete range check (against the sub-hunk's changed-line count)
-                        // and normalisation (sort + dedup, via a `BTreeSet`) happen at emission in
-                        // `slice_changed_lines`; no need to canonicalise the raw indices here.
-                        chosen.entry(fi).or_default().push(Chosen::Lines {
-                            index: *index,
-                            lines: lines.clone(),
-                        });
-                    }
-                }
+                resolve_file_selector(patch, path.as_deref(), indices, subs_cache, &mut chosen)?
             }
         }
     }
     Ok(chosen)
+}
+
+/// Resolve one `path:set` selector (including the bare-set form, where `path` is `None`) and
+/// record its picks in `chosen`.
+fn resolve_file_selector(
+    patch: &Patch,
+    path: Option<&[u8]>,
+    indices: &IndexSet,
+    subs_cache: &mut BTreeMap<usize, Vec<Hunk>>,
+    chosen: &mut BTreeMap<usize, Vec<Chosen>>,
+) -> Result<(), SelectError> {
+    let fi = resolve_file(patch, path)?;
+    // A binary file has no sub-hunks; a non-line-set selector picks the whole binary change.
+    // A line-set selector makes no sense for a binary file.
+    if matches!(patch.files[fi].content, FileContent::Binary(_)) {
+        if let IndexSet::LineSet { .. } = indices {
+            return Err(SelectError::LineSelect(format!(
+                "{} is a binary file",
+                patch.files[fi].display_path()
+            )));
+        }
+        chosen.entry(fi).or_default();
+        return Ok(());
+    }
+    let subs = subs_cache
+        .entry(fi)
+        .or_insert_with(|| build_file_subs(&patch.files[fi]));
+    match indices {
+        IndexSet::All => {
+            // A text entry may legitimately have no hunks — a pure rename or a mode change.
+            // `*` then means "take this entry", the same as for a binary file, so record it
+            // even though there is nothing to pick.
+            let picks = chosen.entry(fi).or_default();
+            picks.extend((1..=subs.len()).map(Chosen::Whole));
+        }
+        IndexSet::List(v) => {
+            // Every index of this selector lands in the same file, so the entry is looked up
+            // once rather than per index. An error below aborts the whole selection anyway,
+            // so an entry created for a selector that then fails is never observed.
+            let picks = chosen.entry(fi).or_default();
+            for &idx in v {
+                if idx > subs.len() {
+                    return Err(SelectError::NoIndex(format!(
+                        "{}:{idx}",
+                        display_name(patch, fi, path)
+                    )));
+                }
+                picks.push(Chosen::Whole(idx));
+            }
+        }
+        IndexSet::LineSet { index, lines } => {
+            if *index > subs.len() {
+                return Err(SelectError::NoIndex(format!(
+                    "{}:{index}",
+                    display_name(patch, fi, path)
+                )));
+            }
+            // The concrete range check (against the sub-hunk's changed-line count) and
+            // normalisation (sort + dedup, via a `BTreeSet`) happen at emission in
+            // `slice_changed_lines`; no need to canonicalise the raw indices here.
+            chosen.entry(fi).or_default().push(Chosen::Lines {
+                index: *index,
+                lines: lines.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// A sub-hunk addressed by `@L` (a changed-line subset) must be its ONLY selection. Partial `@L`
+/// pieces of one sub-hunk emitted together would carry mutually inconsistent new-side line
+/// numbers, and combining `@L` with a whole pick of the same sub-hunk double-counts its lines.
+/// Reject as a usage error before emission; the diff -> stage -> re-diff loop is the way to
+/// combine such pieces.
+fn reject_conflicting_line_set_picks(picks: &[Chosen]) -> Result<(), SelectError> {
+    // Count once per sub-hunk index instead of rescanning the picks for each `@L`: the
+    // per-pick scan is quadratic, and a scripted caller can pass a long list of selectors.
+    let mut times_picked: BTreeMap<usize, usize> = BTreeMap::new();
+    for p in picks {
+        *times_picked.entry(p.index()).or_insert(0) += 1;
+    }
+    for p in picks {
+        if let Chosen::Lines { index, .. } = p {
+            if times_picked[index] > 1 {
+                return Err(SelectError::LineSelect(format!(
+                    "sub-hunk {index} is addressed by @L together with another \
+                     selection of the same sub-hunk; address it once, or stage the \
+                     pieces in separate rounds"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Turn ordered, deduplicated picks into the hunks of one file: a whole pick clones its
+/// sub-hunk, an `@L` pick cuts it down to the selected changed lines.
+fn materialise_picks(subs: &[Hunk], picks: &[Chosen]) -> Result<Vec<Hunk>, SelectError> {
+    let mut hunks = Vec::with_capacity(picks.len());
+    for pick in picks {
+        match pick {
+            Chosen::Whole(i) => hunks.push(subs[i - 1].clone()),
+            Chosen::Lines { index, lines } => {
+                let set: BTreeSet<usize> = lines.iter().copied().collect();
+                let cut = slice_changed_lines(&subs[index - 1], &set)
+                    .map_err(|e| SelectError::LineSelect(e.to_string()))?;
+                hunks.push(cut);
+            }
+        }
+    }
+    Ok(hunks)
 }
 
 /// Emission phase: materialise the resolved selections into a result patch. Per file, order the
@@ -415,23 +573,7 @@ fn emit_selection(
             // A binary file has no sub-hunks; its picks vec is always empty.
             FileContent::Binary(b) => FileContent::Binary(b.clone()),
             FileContent::Text(_) => {
-                let subs = &subs_cache[&fi];
-                // A sub-hunk addressed by `@L` (a changed-line subset) must be its ONLY selection.
-                // Partial `@L` pieces of one sub-hunk emitted together would carry mutually
-                // inconsistent new-side line numbers, and combining `@L` with a whole pick of the
-                // same sub-hunk double-counts its lines. Reject as a usage error before emission;
-                // the diff -> stage -> re-diff loop is the way to combine such pieces.
-                for p in &picks {
-                    if let Chosen::Lines { index, .. } = p {
-                        if picks.iter().filter(|q| q.index() == *index).count() > 1 {
-                            return Err(SelectError::LineSelect(format!(
-                                "sub-hunk {index} is addressed by @L together with another \
-                                 selection of the same sub-hunk; address it once, or stage the \
-                                 pieces in separate rounds"
-                            )));
-                        }
-                    }
-                }
+                reject_conflicting_line_set_picks(&picks)?;
                 // Order by sub-hunk index so emitted hunks follow old-file order and equal-index
                 // whole picks are adjacent for the dedup below. Distinct sub-hunks are disjoint,
                 // so no overlap check is needed: the only same-index multiplicity is a duplicate
@@ -441,23 +583,30 @@ fn emit_selection(
                 picks.dedup_by(
                     |a, b| matches!((a, b), (Chosen::Whole(x), Chosen::Whole(y)) if x == y),
                 );
-                let mut hunks = Vec::with_capacity(picks.len());
-                for pick in &picks {
-                    match pick {
-                        Chosen::Whole(i) => hunks.push(subs[i - 1].clone()),
-                        Chosen::Lines { index, lines } => {
-                            let set: BTreeSet<usize> = lines.iter().copied().collect();
-                            let cut = slice_changed_lines(&subs[index - 1], &set)
-                                .map_err(|e| SelectError::LineSelect(e.to_string()))?;
-                            hunks.push(cut);
-                        }
-                    }
-                }
-                FileContent::Text(hunks)
+                FileContent::Text(materialise_picks(&subs_cache[&fi], &picks)?)
             }
         };
+        // Only the file's tail (lines after its last hunk, e.g. the `-- \n<version>` signature
+        // of a format-patch) carries over: it keeps its meaning whichever sub-hunks were
+        // picked. Lines recorded between hunks have no defined place once hunks are dropped
+        // or split, so they are not emitted.
+        let src_hunks = match &src.content {
+            FileContent::Text(h) => h.len(),
+            FileContent::Binary(_) => 0,
+        };
+        let out_hunks = match &content {
+            FileContent::Text(h) => h.len(),
+            FileContent::Binary(_) => 0,
+        };
+        let trailer = src
+            .trailer
+            .iter()
+            .filter(|(at, _)| *at == src_hunks)
+            .map(|(_, l)| (out_hunks, l.clone()))
+            .collect();
         files.push(FileDiff {
             headers: src.headers.clone(),
+            trailer,
             old_path: src.old_path.clone(),
             new_path: src.new_path.clone(),
             content,
@@ -467,13 +616,17 @@ fn emit_selection(
 }
 
 /// Resolve an `@<id>` selector: match every sub-hunk in the patch whose content hash equals
-/// `id`, confirm the matches are byte-identical (otherwise an accidental hash collision between
-/// distinct changes), and record their indices in `chosen`. Binary files have no sub-hunks and
-/// are skipped. This necessarily scans (and auto-splits) the whole patch, unlike path selectors.
+/// `id`, confirm via [`all_same_content`] that the matches carry identical changed (`+`/`-`)
+/// lines under the same path (otherwise an accidental hash collision between distinct changes),
+/// and record their indices in `chosen`. Surrounding context is deliberately not compared —
+/// the id is context-free, so the same change in a different context shares it. Binary files
+/// have no sub-hunks and are skipped. This necessarily scans (and auto-splits) the whole patch,
+/// unlike path selectors.
 fn resolve_id(
     patch: &Patch,
     id: &str,
     subs_cache: &mut BTreeMap<usize, Vec<Hunk>>,
+    hash_cache: &mut BTreeMap<usize, Vec<u64>>,
     chosen: &mut BTreeMap<usize, Vec<Chosen>>,
 ) -> Result<(), SelectError> {
     // Compare 64-bit hashes rather than rendered hex strings to avoid an allocation per
@@ -486,8 +639,11 @@ fn resolve_id(
             continue;
         }
         let subs = subs_cache.entry(fi).or_insert_with(|| build_file_subs(f));
-        for (si, sub) in subs.iter().enumerate() {
-            if subhunk_hash(f, sub) == target {
+        let hashes = hash_cache
+            .entry(fi)
+            .or_insert_with(|| subs.iter().map(|sub| subhunk_hash(f, sub)).collect());
+        for (si, hash) in hashes.iter().enumerate() {
+            if *hash == target {
                 matched.push((fi, si + 1));
             }
         }
@@ -509,7 +665,7 @@ fn resolve_id(
 }
 
 /// Resolve an optional path to a file index. With no path, succeeds only for single-file diffs.
-pub(crate) fn resolve_file(patch: &Patch, path: Option<&str>) -> Result<usize, SelectError> {
+pub(crate) fn resolve_file(patch: &Patch, path: Option<&[u8]>) -> Result<usize, SelectError> {
     match path {
         None => {
             if patch.files.len() == 1 {
@@ -526,15 +682,18 @@ pub(crate) fn resolve_file(patch: &Patch, path: Option<&str>) -> Result<usize, S
                 .iter()
                 .enumerate()
                 .filter(|(_, f)| {
-                    f.new_path.as_deref() == Some(p.as_bytes())
-                        || f.old_path.as_deref() == Some(p.as_bytes())
+                    f.new_path.as_deref() == Some(p) || f.old_path.as_deref() == Some(p)
                 })
                 .map(|(i, _)| i)
                 .collect();
             match matches.as_slice() {
                 [one] => Ok(*one),
-                [] => Err(SelectError::UnknownPath(p.to_string())),
-                _ => Err(SelectError::AmbiguousPath(p.to_string())),
+                [] => Err(SelectError::UnknownPath(
+                    String::from_utf8_lossy(p).into_owned(),
+                )),
+                _ => Err(SelectError::AmbiguousPath(
+                    String::from_utf8_lossy(p).into_owned(),
+                )),
             }
         }
     }
@@ -552,7 +711,7 @@ pub fn resolve_hunk(patch: &Patch, addr: &str) -> Result<(usize, usize), SelectE
     if n == 0 {
         return Err(SelectError::BadSelector(addr.to_string()));
     }
-    let fi = resolve_file(patch, path.as_deref())?;
+    let fi = resolve_file(patch, path.as_deref().map(str::as_bytes))?;
     match &patch.files[fi].content {
         FileContent::Text(h) if n <= h.len() => Ok((fi, n - 1)),
         FileContent::Text(_) => Err(SelectError::NoIndex(addr.to_string())),
@@ -564,9 +723,11 @@ pub fn resolve_hunk(patch: &Patch, addr: &str) -> Result<(usize, usize), SelectE
 mod tests {
     use super::*;
     use crate::emit::emit;
+    use crate::gittest::applies_to_file;
     use crate::parser::parse;
+    use crate::subhunk_id::subhunk_id;
 
-    const MULTI: &str = "\
+    const TWO_CHANGES: &str = "\
 diff --git a/f b/f
 --- a/f
 +++ b/f
@@ -584,6 +745,7 @@ diff --git a/f b/f
     fn mk_file(path: &str) -> FileDiff {
         FileDiff {
             headers: Vec::new(),
+            trailer: Vec::new(),
             old_path: Some(path.as_bytes().to_vec()),
             new_path: Some(path.as_bytes().to_vec()),
             content: FileContent::Text(Vec::new()),
@@ -649,7 +811,7 @@ diff --git a/f b/f
         assert_eq!(
             sels[0],
             Selector::File {
-                path: Some("src/f".to_string()),
+                path: Some(b"src/f".to_vec()),
                 indices: IndexSet::All,
             }
         );
@@ -669,7 +831,7 @@ diff --git a/f b/f
         assert_eq!(
             sels[0],
             Selector::File {
-                path: Some("@foo".to_string()),
+                path: Some(b"@foo".to_vec()),
                 indices: IndexSet::List(vec![1]),
             }
         );
@@ -687,7 +849,7 @@ diff --git a/f b/f
         assert_eq!(
             sels[0],
             Selector::File {
-                path: Some("src/f".to_string()),
+                path: Some(b"src/f".to_vec()),
                 indices: IndexSet::List(vec![2, 3, 4]),
             }
         );
@@ -695,7 +857,7 @@ diff --git a/f b/f
 
     #[test]
     fn select_first_subhunk_only() {
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         let sels = parse_selectors(&["1".to_string()]).unwrap();
         let out = select(&p, &sels).unwrap();
         let text = String::from_utf8(emit(&out)).unwrap();
@@ -751,7 +913,7 @@ diff --git a/f b/f
 
     #[test]
     fn select_bare_star_selects_every_subhunk() {
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         let sels = parse_selectors(&["*".to_string()]).unwrap();
         let out = select(&p, &sels).unwrap();
         let text = String::from_utf8(emit(&out)).unwrap();
@@ -772,12 +934,11 @@ diff --git a/f b/f
 
     #[test]
     fn select_by_id_picks_matching_subhunk() {
-        use crate::subhunk_id::subhunk_id;
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         let view = build_view(&p);
-        let (fi, subs) = &view[0];
+        let subs = &view[0];
         // Second sub-hunk: the d->D change.
-        let id = subhunk_id(&p.files[*fi], &subs[1]);
+        let id = subhunk_id(&p.files[0], &subs[1]);
         let sels = parse_selectors(&[format!("@{id}")]).unwrap();
         let out = select(&p, &sels).unwrap();
         let text = String::from_utf8(emit(&out)).unwrap();
@@ -787,23 +948,21 @@ diff --git a/f b/f
 
     #[test]
     fn select_id_is_case_insensitive() {
-        use crate::subhunk_id::subhunk_id;
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         let view = build_view(&p);
-        let id = subhunk_id(&p.files[0], &view[0].1[0]).to_uppercase();
+        let id = subhunk_id(&p.files[0], &view[0][0]).to_uppercase();
         let sels = parse_selectors(&[format!("@{id}")]).unwrap();
         assert!(select(&p, &sels).is_ok(), "uppercase id must still match");
     }
 
     #[test]
     fn select_id_selects_all_identical_subhunks() {
-        use crate::subhunk_id::subhunk_id;
         let p = parse(SAME_TWICE.as_bytes()).unwrap();
         let view = build_view(&p);
-        let (fi, subs) = &view[0];
+        let subs = &view[0];
         assert_eq!(subs.len(), 2);
-        let id0 = subhunk_id(&p.files[*fi], &subs[0]);
-        let id1 = subhunk_id(&p.files[*fi], &subs[1]);
+        let id0 = subhunk_id(&p.files[0], &subs[0]);
+        let id1 = subhunk_id(&p.files[0], &subs[1]);
         assert_eq!(id0, id1, "identical changes must share an id");
 
         let sels = parse_selectors(&[format!("@{id0}")]).unwrap();
@@ -818,17 +977,17 @@ diff --git a/f b/f
 
     #[test]
     fn select_unknown_id_errors() {
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         let sels = parse_selectors(&["@0000000000000000".to_string()]).unwrap();
         assert!(matches!(select(&p, &sels), Err(SelectError::UnknownId(_))));
     }
 
     #[test]
     fn collision_check_distinguishes_distinct_content() {
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         let view = build_view(&p);
-        let (fi, subs) = &view[0];
-        let f = &p.files[*fi];
+        let subs = &view[0];
+        let f = &p.files[0];
         assert!(
             all_same_content(&[(f, &subs[0]), (f, &subs[0])]),
             "identical sub-hunks are not a collision"
@@ -876,51 +1035,47 @@ diff --git a/f b/f
 
     #[test]
     fn select_unknown_index_errors() {
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         let sels = parse_selectors(&["9".to_string()]).unwrap();
         assert!(matches!(select(&p, &sels), Err(SelectError::NoIndex(_))));
     }
 
     #[test]
     fn select_empty_is_error() {
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         assert_eq!(select(&p, &[]), Err(SelectError::EmptySelection));
     }
 
     #[test]
     fn resolve_hunk_addresses_original_hunk() {
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         assert_eq!(resolve_hunk(&p, "1").unwrap(), (0, 0));
     }
 
     #[test]
-    fn parse_lineset_selector_basic() {
-        let sels = parse_selectors(&["1@L1,3".to_string()]).unwrap();
-        assert_eq!(
-            sels[0],
-            Selector::File {
-                path: None,
-                indices: IndexSet::LineSet {
-                    index: 1,
-                    lines: vec![1, 3],
-                },
-            }
-        );
-    }
+    #[cfg(unix)]
+    fn selector_path_may_hold_invalid_utf8() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
 
-    #[test]
-    fn parse_lineset_with_path_and_range() {
-        let sels = parse_selectors(&["src/f:2@L1-2,4".to_string()]).unwrap();
+        // A diff can name a file whose path is not valid UTF-8, so the selector must be able
+        // to spell it: the path is kept as raw bytes, only the set after ':' is text.
+        let sels = parse_selectors(&[OsString::from_vec(b"bad\xffname.txt:1,3".to_vec())]).unwrap();
         assert_eq!(
             sels[0],
             Selector::File {
-                path: Some("src/f".to_string()),
-                indices: IndexSet::LineSet {
-                    index: 2,
-                    lines: vec![1, 2, 4],
-                },
+                path: Some(b"bad\xffname.txt".to_vec()),
+                indices: IndexSet::List(vec![1, 3]),
             }
         );
+        // Without a set there is nothing such an argument could be: report why, not "bad
+        // selector".
+        match parse_selectors(&[OsString::from_vec(b"bad\xffname.txt".to_vec())]) {
+            Err(SelectError::BadSelector(msg)) => {
+                assert!(msg.contains("not valid UTF-8"), "message was {msg:?}")
+            }
+            other => panic!("expected BadSelector, got {other:?}"),
+        }
     }
 
     #[test]
@@ -963,14 +1118,30 @@ diff --git a/f b/f
     }
 
     #[test]
-    fn parse_lineset_rejects_malformed() {
-        // empty set, zero index, zero line, id-form before '@'
-        assert!(parse_selectors(&["1@L".to_string()]).is_err());
-        assert!(parse_selectors(&["0@L1".to_string()]).is_err());
-        assert!(parse_selectors(&["1@L0".to_string()]).is_err());
-        assert!(parse_selectors(&["1@L2-1".to_string()]).is_err());
-        // '@id@Lset' is NOT supported: only a numeric index may precede '@'.
-        assert!(parse_selectors(&["@deadbeef@L1-2".to_string()]).is_err());
+    fn path_form_reports_the_set_reason_not_the_whole_arg() {
+        // In `path:set` a broken set used to be re-read as a bare set together with the path,
+        // so `f:2-1` was reported as "not a number: f:2" instead of naming the real fault.
+        let cases = [
+            ("f:2-1", "reversed range"),
+            ("f:0", "1-based"),
+            ("f:1-99999999", "range too large"),
+        ];
+        for (sel, needle) in cases {
+            match parse_selectors(&[sel.to_string()]) {
+                Err(SelectError::BadSelector(msg)) => assert!(
+                    msg.contains(needle),
+                    "selector {sel}: message {msg:?} lacks {needle:?}"
+                ),
+                other => panic!("selector {sel}: expected BadSelector, got {other:?}"),
+            }
+        }
+        // A colon inside a path is still a path: the text after it is not set-shaped, so the
+        // arg falls through to the path form rather than being reported as a broken set.
+        let parsed = parse_selectors(&["x:y:1".to_string()]).unwrap();
+        assert!(
+            matches!(&parsed[0], Selector::File { path: Some(p), .. } if p == b"x:y"),
+            "expected path form for x:y:1, got {parsed:?}"
+        );
     }
 
     const PURE_ADD_FILE: &str = "\
@@ -986,7 +1157,7 @@ new file mode 100644
 ";
 
     #[test]
-    fn select_lineset_first_two_changed_lines() {
+    fn select_line_set_first_two_changed_lines() {
         let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
         let sels = parse_selectors(&["1@L1,2".to_string()]).unwrap();
         let out = select(&p, &sels).unwrap();
@@ -998,55 +1169,14 @@ new file mode 100644
     }
 
     #[test]
-    fn select_lineset_out_of_range_errors() {
-        let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
-        let sels = parse_selectors(&["1@L1-99".to_string()]).unwrap();
-        assert!(matches!(select(&p, &sels), Err(SelectError::LineSelect(_))));
-    }
-
-    #[test]
-    fn select_lineset_unknown_index_errors() {
-        let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
-        let sels = parse_selectors(&["9@L1,2".to_string()]).unwrap();
-        assert!(matches!(select(&p, &sels), Err(SelectError::NoIndex(_))));
-    }
-
-    #[test]
-    fn select_whole_and_lineset_of_same_subhunk_rejected() {
-        // A whole sub-hunk and an `@L` subset of the same sub-hunk double-count its lines.
-        // Selecting both is contradictory and rejected as a selector error.
-        let p = parse(PURE_ADD_FILE.as_bytes()).unwrap();
-        let sels = parse_selectors(&["1".to_string(), "1@L1,2".to_string()]).unwrap();
-        assert!(matches!(select(&p, &sels), Err(SelectError::LineSelect(_))));
-    }
-
-    #[test]
     fn select_second_subhunk_applies_via_git() {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         // Select only the SECOND sub-hunk (the d->D change).
         let sels = parse_selectors(&["2".to_string()]).unwrap();
         let out = select(&p, &sels).unwrap();
         let diff = emit(&out);
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f"), "a\nb\nc\nd\ne\n").unwrap();
-        Command::new("git")
-            .arg("init")
-            .arg("-q")
-            .current_dir(&dir)
-            .status()
-            .unwrap();
-        let mut child = Command::new("git")
-            .arg("apply")
-            .arg("--check")
-            .current_dir(&dir)
-            .stdin(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child.stdin.take().unwrap().write_all(&diff).unwrap();
         assert!(
-            child.wait().unwrap().success(),
+            applies_to_file(&diff, "a\nb\nc\nd\ne\n"),
             "second-only sub-hunk failed to apply:\n{}",
             String::from_utf8_lossy(&diff)
         );
@@ -1054,7 +1184,7 @@ new file mode 100644
 
     /// A single-file replacement diff: file `a,b` -> `A,B` as one contiguous run.
     /// Changed lines: 1=`-a`, 2=`-b`, 3=`+A`, 4=`+B`.
-    const REPL_FILE: &str = "\
+    const REPLACEMENT: &str = "\
 diff --git a/f b/f
 --- a/f
 +++ b/f
@@ -1064,29 +1194,6 @@ diff --git a/f b/f
 +A
 +B
 ";
-
-    /// True if `diff_bytes` applies to a file `f` seeded with `content` in a fresh git repo.
-    fn apply_ok(diff_bytes: &[u8], content: &str) -> bool {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f"), content).unwrap();
-        Command::new("git")
-            .arg("init")
-            .arg("-q")
-            .current_dir(&dir)
-            .status()
-            .unwrap();
-        let mut child = Command::new("git")
-            .arg("apply")
-            .arg("--check")
-            .current_dir(&dir)
-            .stdin(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child.stdin.take().unwrap().write_all(diff_bytes).unwrap();
-        child.wait().unwrap().success()
-    }
 
     #[test]
     fn parse_line_set_selector() {
@@ -1121,10 +1228,22 @@ diff --git a/f b/f
         assert_eq!(
             sels[0],
             Selector::File {
-                path: Some("src/f".to_string()),
+                path: Some(b"src/f".to_vec()),
                 indices: IndexSet::LineSet {
                     index: 2,
                     lines: vec![1],
+                },
+            }
+        );
+        // A range inside the set expands the same way behind a path.
+        let sels = parse_selectors(&["src/f:2@L1-2,4".to_string()]).unwrap();
+        assert_eq!(
+            sels[0],
+            Selector::File {
+                path: Some(b"src/f".to_vec()),
+                indices: IndexSet::LineSet {
+                    index: 2,
+                    lines: vec![1, 2, 4],
                 },
             }
         );
@@ -1132,24 +1251,27 @@ diff --git a/f b/f
 
     #[test]
     fn parse_line_set_rejects_malformed() {
-        // Empty set, zero index bound, reversed range inside the set.
+        // Empty set, zero index bound, zero sub-hunk index, reversed range inside the set.
         assert!(parse_selectors(&["1@L".to_string()]).is_err());
         assert!(parse_selectors(&["1@L0".to_string()]).is_err());
+        assert!(parse_selectors(&["0@L1".to_string()]).is_err());
         assert!(parse_selectors(&["1@L3-1".to_string()]).is_err());
+        // '@id@Lset' is NOT supported: only a numeric index may precede '@'.
+        assert!(parse_selectors(&["@deadbeef@L1-2".to_string()]).is_err());
     }
 
     #[test]
     fn select_line_set_separates_deletions_from_additions() {
         // The key agent operation: two invocations, each applying to the original file, stage the
         // removals and the insertions of a replacement independently.
-        let p = parse(REPL_FILE.as_bytes()).unwrap();
+        let p = parse(REPLACEMENT.as_bytes()).unwrap();
 
         let dels = select(&p, &parse_selectors(&["1@L1,2".to_string()]).unwrap()).unwrap();
         let dels_text = String::from_utf8(emit(&dels)).unwrap();
         assert!(dels_text.contains("-a") && dels_text.contains("-b"));
         assert!(!dels_text.contains("+A") && !dels_text.contains("+B"));
         assert!(
-            apply_ok(&emit(&dels), "a\nb\n"),
+            applies_to_file(&emit(&dels), "a\nb\n"),
             "deletion piece must apply"
         );
 
@@ -1161,21 +1283,21 @@ diff --git a/f b/f
             "deletions must be context, not `-`"
         );
         assert!(
-            apply_ok(&emit(&adds), "a\nb\n"),
+            applies_to_file(&emit(&adds), "a\nb\n"),
             "addition piece must apply"
         );
     }
 
     #[test]
     fn select_line_set_out_of_range_errors() {
-        let p = parse(REPL_FILE.as_bytes()).unwrap(); // 4 changed lines
+        let p = parse(REPLACEMENT.as_bytes()).unwrap(); // 4 changed lines
         let sels = parse_selectors(&["1@L5".to_string()]).unwrap();
         assert!(matches!(select(&p, &sels), Err(SelectError::LineSelect(_))));
     }
 
     #[test]
     fn select_line_set_unknown_index_errors() {
-        let p = parse(REPL_FILE.as_bytes()).unwrap();
+        let p = parse(REPLACEMENT.as_bytes()).unwrap();
         let sels = parse_selectors(&["9@L1".to_string()]).unwrap();
         assert!(matches!(select(&p, &sels), Err(SelectError::NoIndex(_))));
     }
@@ -1183,7 +1305,7 @@ diff --git a/f b/f
     #[test]
     fn select_line_set_combined_with_whole_same_subhunk_rejected() {
         // `@L` of a sub-hunk plus the whole sub-hunk double-counts its lines: usage error.
-        let p = parse(REPL_FILE.as_bytes()).unwrap();
+        let p = parse(REPLACEMENT.as_bytes()).unwrap();
         let sels = parse_selectors(&["1".to_string(), "1@L1".to_string()]).unwrap();
         assert!(matches!(select(&p, &sels), Err(SelectError::LineSelect(_))));
     }
@@ -1192,7 +1314,7 @@ diff --git a/f b/f
     fn select_two_line_sets_of_same_subhunk_rejected() {
         // Two `@L` selections of the same sub-hunk in one invocation would emit mutually
         // inconsistent pieces: usage error, use the re-diff loop instead.
-        let p = parse(REPL_FILE.as_bytes()).unwrap();
+        let p = parse(REPLACEMENT.as_bytes()).unwrap();
         let sels = parse_selectors(&["1@L1,2".to_string(), "1@L3,4".to_string()]).unwrap();
         assert!(matches!(select(&p, &sels), Err(SelectError::LineSelect(_))));
     }

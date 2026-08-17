@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// Default maximum input size in bytes (64 MiB).
@@ -40,13 +41,9 @@ Examples:
   git diff src/lib.rs | hunkpick select 1@L1,2 | git apply --cached && git commit -m 'add ...'
 
 Content ids (@<id>):
-  Every sub-hunk in `list` output carries a stable 16-hex content id, also
-  accepted by `select` as @<id>. The id hashes only the file path and the
-  sub-hunk's changed (+/-) lines -- not its context or the @@ line numbers --
-  so it survives a re-diff even when staging a neighbour renumbers the bare
-  indices or rewrites the surrounding context. Capture it once, reuse it across
-  the whole diff -> stage -> re-diff loop. (Byte-identical changes share an id;
-  `list --json` reports id_count, 1 = unique.)
+  A 16-hex id per sub-hunk, shown by `list` and accepted by `select`. It is
+  context-free, so it survives a re-diff: capture it once, reuse it across the
+  whole diff -> stage -> re-diff loop. Full rules: `hunkpick select --help`.
 
   # Select by content id (stable across re-diffs)
   git diff | hunkpick select @8002dd73f0dfd2f4 | git apply --cached
@@ -95,6 +92,7 @@ const AFTER_SHORT_HELP: &str = "Run 'hunkpick --help' for examples and content-i
     after_long_help = AFTER_LONG_HELP
 )]
 pub struct Cli {
+    /// The subcommand to run.
     #[command(subcommand)]
     pub command: Command,
 }
@@ -129,6 +127,7 @@ pub struct InputOpts {
 // comments are surfaced verbatim by clap in `--help`, so wrapping the token in backticks or
 // escaping the `<` would leak into the CLI output; suppress the rustdoc HTML-tag lint instead.
 #[allow(rustdoc::invalid_html_tags)]
+/// The subcommands hunkpick offers.
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// List the addressable sub-hunks of each file.
@@ -145,8 +144,11 @@ pub enum Command {
         /// Emit machine-readable JSON instead of the human listing.
         #[arg(long)]
         json: bool,
+        /// Colour the human listing: `auto` (a terminal, unless NO_COLOR is set), `always`
+        /// or `never`. CLICOLOR_FORCE forces colour in `auto`. `--json` is never coloured.
         #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
         color: ColorMode,
+        /// Where the diff is read from.
         #[command(flatten)]
         input: InputOpts,
     },
@@ -164,31 +166,31 @@ pub enum Command {
         ///   path:N@L<set>   cut sub-hunk N of a file to a subset of its changed (+/-) lines
         ///   N@L<set>        the same in a single-file diff (set: e.g. L1,3 or L1-2,4)
         ///
-        /// Indices and ids come from `list`. A content id is derived from the file path and
-        /// the sub-hunk's changed (+/-) lines only, ignoring context and the @@ line numbers:
-        /// it stays the same across a re-diff even when an edit elsewhere shifts this change's
-        /// line numbers or staging a neighbour rewrites its context, so an @ID captured once
-        /// keeps addressing the change; it changes only when this change's own +/- lines do.
-        /// Ids match case-insensitively. Changes with identical +/- lines share an id and are
-        /// selected together; use path:N (guided by id_count from `list --json`) to address
-        /// just one. Precedence: path:set first (a file named `@foo` stays addressable as
-        /// `@foo:1`), then @ID, then a bare set.
+        /// Indices and ids come from `list`. An id is derived from the file path and the
+        /// sub-hunk's changed (+/-) lines only, so it survives a re-diff; it matches
+        /// case-insensitively, and changes with identical +/- lines share one and are selected
+        /// together (use path:N, guided by id_count from `list --json`, to address just one).
+        /// Precedence: path:set first (a file named `@foo` stays addressable as `@foo:1`),
+        /// then @ID, then a bare set.
         ///
-        /// INDEX@L<set> cuts a sub-hunk to an arbitrary subset of its changed (+/-) lines.
-        /// Only a numeric index may precede '@' (not @id, not *). The set numbers the sub-hunk's
-        /// changed lines 1..N in body order (deletions and additions share one numbering, as
-        /// shown by `list --json`'s changed_lines), e.g. L1,3 or L1-2,4. It has no boundary
-        /// restriction and keeps both leading and trailing context, so every subset applies
-        /// under `git apply`: it can split an addition-only block (a new-function block or a
-        /// file-creation diff) across commits, isolate a deletion surrounded by additions, or
-        /// separate a replacement's removals from its insertions (select the deletions in one
-        /// round, the additions in the next). A sub-hunk addressed by @L must be addressed once
-        /// per invocation (do not combine it with another selection of the same sub-hunk); stage
+        /// In INDEX@L<set> only a numeric index may precede '@' (not @id, not *), and the set
+        /// numbers the sub-hunk's changed lines 1..N in body order — deletions and additions
+        /// share one numbering, as shown by `list --json`'s changed_lines. Every subset applies:
+        /// the cut keeps both leading and trailing context. Address a sub-hunk by @L once per
+        /// invocation (do not combine it with another selection of the same sub-hunk); stage
         /// further pieces in later rounds.
+        ///
+        /// The README is the reference for the grammar, with worked examples of splitting a
+        /// block across commits and separating a replacement's removals from its insertions.
+        // OsString, not String: a diff can name a file whose path is not valid UTF-8 (legal on
+        // Unix), and such a file must stay addressable by name. clap would reject the argument
+        // outright as "invalid UTF-8" before hunkpick ever saw it.
         #[arg(verbatim_doc_comment)]
-        selectors: Vec<String>,
+        selectors: Vec<OsString>,
+        /// Where the diff is read from.
         #[command(flatten)]
         input: InputOpts,
+        /// How the result diff is verified before it is written out.
         #[command(flatten)]
         verify: VerifyOpts,
     },
@@ -204,17 +206,23 @@ pub enum Command {
         /// New-file line numbers to cut at.
         #[arg(long = "at", value_delimiter = ',', required = true)]
         at: Vec<u32>,
+        /// Where the diff is read from.
         #[command(flatten)]
         input: InputOpts,
+        /// How the result diff is verified before it is written out.
         #[command(flatten)]
         verify: VerifyOpts,
     },
 }
 
+/// When to colorize the human-readable listing.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum ColorMode {
+    /// Colorize when stdout is a terminal, honouring `NO_COLOR` and `CLICOLOR_FORCE`.
     Auto,
+    /// Always colorize, even into a pipe.
     Always,
+    /// Never colorize.
     Never,
 }
 
@@ -233,6 +241,7 @@ fn env_flag_set(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|v| !v.is_empty())
 }
 
+/// The decision behind [`resolve_color`], with the environment passed in so it can be tested.
 pub fn resolve_color_with(
     mode: ColorMode,
     is_tty: bool,
@@ -318,7 +327,7 @@ mod tests {
             Command::Select {
                 selectors, verify, ..
             } => {
-                assert_eq!(selectors, vec!["1,3".to_string()]);
+                assert_eq!(selectors, vec![OsString::from("1,3")]);
                 assert!(verify.no_verify_result_diff_internal);
             }
             _ => panic!("expected select"),

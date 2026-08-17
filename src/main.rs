@@ -1,10 +1,11 @@
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
-use hunkpick::cli::{Cli, Command, InputOpts, VerifyOpts};
+use hunkpick::cli::{Cli, ColorMode, Command, InputOpts, VerifyOpts};
 use hunkpick::error::AppError;
 use hunkpick::{emit, list, model, parser, select, split, validate};
 
@@ -22,54 +23,74 @@ fn run() -> Result<(), AppError> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::List { json, color, input } => {
-            let Some(patch) = load_and_parse(&input)? else {
-                return Ok(());
-            };
-            let use_color = hunkpick::cli::resolve_color(color);
-            let text = if json {
-                list::list_json(&patch)
-            } else {
-                list::list_human(&patch, use_color)
-            };
-            write_out(text.as_bytes())?;
-            if !json && !text.ends_with('\n') {
-                write_out(b"\n")?;
-            }
-            Ok(())
-        }
+        Command::List { json, color, input } => run_list(json, color, &input),
         Command::Select {
             selectors,
             input,
             verify,
-        } => {
-            let Some(patch) = load_and_parse(&input)? else {
-                return Ok(());
-            };
-            let sels = select::parse_selectors(&selectors).map_err(usage)?;
-            let out = select::select(&patch, &sels).map_err(usage)?;
-            emit_verified(&out, &verify)
-        }
+        } => run_select(&selectors, &input, &verify),
         Command::Split {
             hunk,
             at,
             input,
             verify,
-        } => {
-            let Some(patch) = load_and_parse(&input)? else {
-                return Ok(());
-            };
-            let (fi, hi) = select::resolve_hunk(&patch, &hunk).map_err(usage)?;
-            let mut out = patch.clone();
-            // `resolve_hunk` already rejected binary files, so the target is always text.
-            let model::FileContent::Text(hunks) = &mut out.files[fi].content else {
-                unreachable!("resolve_hunk guarantees a text file");
-            };
-            let pieces = split::split_hunk_at(&hunks[hi], &at).map_err(usage)?;
-            hunks.splice(hi..=hi, pieces);
-            emit_verified(&out, &verify)
-        }
+        } => run_split(&hunk, &at, &input, &verify),
     }
+}
+
+fn run_list(json: bool, color: ColorMode, input: &InputOpts) -> Result<(), AppError> {
+    let Some(patch) = load_and_parse(input)? else {
+        return Ok(());
+    };
+    let use_color = hunkpick::cli::resolve_color(color);
+    let text = if json {
+        list::list_json(&patch)
+    } else {
+        list::list_human(&patch, use_color)
+    };
+    write_out(text.as_bytes())?;
+    if !json && !text.ends_with('\n') {
+        write_out(b"\n")?;
+    }
+    Ok(())
+}
+
+fn run_select(
+    selectors: &[OsString],
+    input: &InputOpts,
+    verify: &VerifyOpts,
+) -> Result<(), AppError> {
+    let Some(patch) = load_and_parse(input)? else {
+        return Ok(());
+    };
+    let sels = select::parse_selectors(selectors).map_err(usage)?;
+    let out = select::select(&patch, &sels).map_err(usage)?;
+    emit_verified(&out, verify)
+}
+
+fn run_split(
+    hunk: &str,
+    at: &[u32],
+    input: &InputOpts,
+    verify: &VerifyOpts,
+) -> Result<(), AppError> {
+    // Split rewrites one hunk in place: the parsed diff is owned here, so there is no
+    // reason to hold a second copy of the whole patch on the heap.
+    let Some(mut patch) = load_and_parse(input)? else {
+        return Ok(());
+    };
+    let (fi, hi) = select::resolve_hunk(&patch, hunk).map_err(usage)?;
+    // `resolve_hunk` already rejected binary files, so the target is always text.
+    let model::FileContent::Text(hunks) = &mut patch.files[fi].content else {
+        unreachable!("resolve_hunk guarantees a text file");
+    };
+    let pieces = split::split_hunk_at(&hunks[hi], at).map_err(usage)?;
+    hunks.splice(hi..=hi, pieces);
+    // Same rule as `select`: the result owns its new-side anchors. A diff carved out
+    // of a larger one keeps anchors describing a file this result does not produce,
+    // and `git apply` searches from the new-side position (see `renumber`).
+    hunkpick::renumber::renumber_new_side(&mut patch);
+    emit_verified(&patch, verify)
 }
 
 /// Read the input (file or stdin, enforcing the size limit), validate it, and parse it.
@@ -84,6 +105,9 @@ fn load_and_parse(opts: &InputOpts) -> Result<Option<model::Patch>, AppError> {
     }
     reject_non_diff(&input)?;
     let patch = parser::parse(&input).map_err(|e| AppError::Usage(format!("parse error: {e}")))?;
+    // A defect of the input diff is a usage error (exit 2), not a verification failure of
+    // hunkpick's own result (exit 70): the latter would report a broken input as a broken tool.
+    validate::validate_input(&patch).map_err(|e| AppError::Usage(format!("input diff: {e}")))?;
     Ok(Some(patch))
 }
 
@@ -148,9 +172,14 @@ fn reject_non_diff(input: &[u8]) -> Result<(), AppError> {
 }
 
 fn write_out(bytes: &[u8]) -> Result<(), AppError> {
-    std::io::stdout()
-        .write_all(bytes)
-        .map_err(|e| AppError::Io(e.to_string()))
+    match std::io::stdout().write_all(bytes) {
+        Ok(()) => Ok(()),
+        // A reader that went away (`hunkpick list | head`) ends this filter's work normally.
+        // Rust ignores SIGPIPE, so the write surfaces as EPIPE here; reporting it as an I/O
+        // failure would fail the whole pipeline under `set -o pipefail`.
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(AppError::Io(e.to_string())),
+    }
 }
 
 fn usage<E: std::fmt::Display>(e: E) -> AppError {
@@ -161,7 +190,7 @@ fn usage<E: std::fmt::Display>(e: E) -> AppError {
 fn emit_verified(out: &model::Patch, verify: &VerifyOpts) -> Result<(), AppError> {
     if !verify.no_verify_result_diff_internal {
         validate::validate_internal(out)
-            .map_err(|e| AppError::Verify(format!("internal consistency check failed: {e:?}")))?;
+            .map_err(|e| AppError::Verify(format!("internal consistency check failed: {e}")))?;
     }
     let bytes = emit::emit(out);
     if verify.verify_result_diff_git {

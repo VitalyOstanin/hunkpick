@@ -21,6 +21,7 @@ pub enum AppError {
 }
 
 impl AppError {
+    /// The process exit code for this error: 2 usage, 70 internal/verify, 74 I/O.
     pub fn exit_code(&self) -> u8 {
         match self {
             AppError::Usage(_) => 2,

@@ -4,21 +4,9 @@
 mod common;
 
 use assert_cmd::Command;
+use common::run_ok;
 use predicates::prelude::*;
 use serde_json::Value;
-
-/// Run hunkpick, assert success, return stdout bytes.
-fn run_ok(args: &[&str], stdin: &str) -> Vec<u8> {
-    Command::cargo_bin("hunkpick")
-        .unwrap()
-        .args(args)
-        .write_stdin(stdin.to_string())
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone()
-}
 
 /// Sub-hunk ids across all files, in `list` order.
 fn ids(diff: &str) -> Vec<String> {
@@ -37,10 +25,6 @@ fn ids(diff: &str) -> Vec<String> {
         .collect()
 }
 
-fn revert(dir: &tempfile::TempDir) {
-    common::sys(dir, &["checkout", "--", "."]);
-}
-
 /// The id of a change must not change when an unrelated edit above it shifts its line numbers.
 #[test]
 fn id_is_stable_across_line_number_shift() {
@@ -51,7 +35,7 @@ fn id_is_stable_across_line_number_shift() {
     let ids_a = ids(&diff_a);
     assert_eq!(ids_a.len(), 1, "variant A has one sub-hunk");
     let id_lower = ids_a[0].clone();
-    revert(&dir);
+    common::revert(&dir);
 
     // Variant B: insert a new first line (shifting everything down) AND make the same lower
     // change. Two hunks now; the lower one has identical content but shifted line numbers.
@@ -62,7 +46,7 @@ fn id_is_stable_across_line_number_shift() {
         ids_b.contains(&id_lower),
         "the lower change keeps its id despite the line-number shift: {id_lower} not in {ids_b:?}"
     );
-    revert(&dir);
+    common::revert(&dir);
 }
 
 /// The id of a change survives staging a neighbouring change, even though that alters this
@@ -85,15 +69,7 @@ fn id_is_stable_across_neighbour_staging() {
 
     // Stage only the FIRST change (b->B) into the index, leaving the working tree with both.
     let staged = run_ok(&["select", "1"], &diff);
-    let mut child = std::process::Command::new("git")
-        .args(["apply", "--cached"])
-        .current_dir(dir.path())
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    use std::io::Write as _;
-    child.stdin.take().unwrap().write_all(&staged).unwrap();
-    assert!(child.wait().unwrap().success(), "git apply --cached failed");
+    common::apply_cached(&dir, &staged);
 
     // Re-diff index vs working tree: only d->D remains, but its context line above is now the
     // staged "B" instead of "b" — a different context window than in the original diff.
@@ -110,7 +86,7 @@ fn id_is_stable_across_neighbour_staging() {
         "the surviving change keeps its id across neighbour staging: {id_second} not in {ids_after:?}"
     );
     common::sys(&dir, &["reset", "-q"]);
-    revert(&dir);
+    common::revert(&dir);
 }
 
 /// `select @<id>` emits exactly the addressed change and the result applies via git.
@@ -122,7 +98,7 @@ fn select_by_id_round_trips_through_git() {
     let id_list = ids(&diff);
     assert_eq!(id_list.len(), 2);
     let id_lower = id_list[1].clone(); // the i->I change
-    revert(&dir);
+    common::revert(&dir);
 
     // Output contains the addressed change only.
     Command::cargo_bin("hunkpick")
@@ -154,7 +130,7 @@ fn select_by_id_round_trips_through_git() {
 fn star_selects_every_subhunk_and_applies() {
     let dir = common::repo_with(&[("f", "a\nb\nc\nd\ne\nf\ng\n")]);
     let diff = common::diff_after(&dir, &[("f", "a\nB\nc\nD\ne\nF\ng\n")]);
-    revert(&dir);
+    common::revert(&dir);
 
     Command::cargo_bin("hunkpick")
         .unwrap()
@@ -190,7 +166,7 @@ fn id_selects_all_identical_changes() {
         id_list[0], id_list[1],
         "identical changes must share an id: {id_list:?}"
     );
-    revert(&dir);
+    common::revert(&dir);
 
     // `@<id>` emits both occurrences (two `+y` lines), and the result applies.
     let out = run_ok(&["select", &format!("@{}", id_list[0])], &diff);

@@ -1,57 +1,10 @@
 // End-to-end integration tests that run hunkpick against a real git repository
 // to verify that selected sub-hunks actually apply cleanly.
 
+mod common;
+
 use assert_cmd::Command;
-use std::process::Command as Sys;
-use tempfile::TempDir;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Initialise a git repo in a temp directory with the given files committed.
-fn repo_with(old_files: &[(&str, &str)]) -> TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    sys(&dir, &["init", "-q"]);
-    sys(&dir, &["config", "user.email", "t@t"]);
-    sys(&dir, &["config", "user.name", "t"]);
-    for (p, c) in old_files {
-        let full = dir.path().join(p);
-        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
-        std::fs::write(full, c).unwrap();
-    }
-    sys(&dir, &["add", "."]);
-    sys(&dir, &["commit", "-q", "-m", "init"]);
-    dir
-}
-
-fn sys(dir: &TempDir, args: &[&str]) {
-    let ok = Sys::new("git")
-        .args(args)
-        .current_dir(dir.path())
-        .status()
-        .unwrap()
-        .success();
-    assert!(ok, "git {args:?} failed");
-}
-
-/// Write new file contents then capture `git diff`; returns the diff text.
-fn diff_after(dir: &TempDir, new_files: &[(&str, &str)]) -> String {
-    for (p, c) in new_files {
-        std::fs::write(dir.path().join(p), c).unwrap();
-    }
-    let out = Sys::new("git")
-        .args(["diff"])
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
-    String::from_utf8(out.stdout).unwrap()
-}
-
-/// Revert the working tree to the last commit.
-fn revert(dir: &TempDir) {
-    sys(dir, &["checkout", "--", "."]);
-}
+use common::{diff_after, repo_with, revert};
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -116,6 +69,94 @@ fn select_all_applies() {
         .success();
 }
 
+/// A diff whose empty context line lost its trailing space in transport (mail clients and
+/// paste buffers routinely strip it) must still be parsed in full: every change stays
+/// addressable and the emitted result applies.
+#[test]
+fn context_line_stripped_of_its_trailing_space_still_applies() {
+    let dir = repo_with(&[("f", "a\nb\nc\nd\n\nx\n")]);
+    let diff = diff_after(&dir, &[("f", "a\nB\nc\nD\n\nX\n")]);
+    revert(&dir);
+
+    // The context line for the empty source line is a lone space; strip it.
+    let stripped = diff.replace("\n \n", "\n\n");
+    assert_ne!(diff, stripped, "input must actually lose the space marker");
+
+    let stdout = Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args([
+            "select",
+            "*",
+            "--verify-result-diff-git",
+            "-C",
+            dir.path().to_str().unwrap(),
+        ])
+        .write_stdin(stripped.clone())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(stdout).unwrap();
+    assert!(
+        text.contains("-x\n+X\n"),
+        "the change after the empty line must survive: {text}"
+    );
+
+    // All three changes stay addressable in the listing.
+    let listed = Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["list", "--json"])
+        .write_stdin(stripped)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listed = String::from_utf8(listed).unwrap();
+    assert_eq!(
+        listed.matches("\"index\"").count(),
+        3,
+        "three sub-hunks expected: {listed}"
+    );
+}
+
+/// A blank line between two hunks (pasted diffs and mail transports add them) must not be
+/// emitted ahead of the first hunk: git rejects such a reordered diff as garbage.
+#[test]
+fn blank_line_between_hunks_does_not_break_the_result() {
+    let before: String = (1..=30).map(|i| format!("l{i}\n")).collect();
+    let after: String = (1..=30)
+        .map(|i| match i {
+            2 => "CHANGED2\n".to_string(),
+            25 => "CHANGED25\n".to_string(),
+            _ => format!("l{i}\n"),
+        })
+        .collect();
+    let dir = repo_with(&[("f", &before)]);
+    let diff = diff_after(&dir, &[("f", &after)]);
+    revert(&dir);
+    let hunks = diff.lines().filter(|l| l.starts_with("@@ ")).count();
+    assert_eq!(hunks, 2, "two hunks expected");
+
+    // Insert a blank line right before the second hunk header.
+    let cut = diff.rfind("@@ -").unwrap();
+    let with_blank = format!("{}\n{}", &diff[..cut], &diff[cut..]);
+
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args([
+            "select",
+            "*",
+            "--verify-result-diff-git",
+            "-C",
+            dir.path().to_str().unwrap(),
+        ])
+        .write_stdin(with_blank)
+        .assert()
+        .success();
+}
+
 /// A diff with a corrupted context line is rejected by git apply --check → exit 70.
 #[test]
 fn tampered_diff_fails_git_check() {
@@ -140,4 +181,32 @@ fn tampered_diff_fails_git_check() {
         .assert()
         .failure()
         .code(70);
+}
+
+/// `-C DIR` must stay the only thing that selects the repository for the git check, whatever
+/// git variables the caller had set. As it stands `git apply --check` reads the working tree
+/// and ignores them; this pins that the check does not start depending on the environment.
+#[test]
+fn git_check_ignores_inherited_git_dir() {
+    let target = repo_with(&[("f", "a\nb\nc\n")]);
+    let diff = diff_after(&target, &[("f", "a\nB\nc\n")]);
+    revert(&target);
+
+    // A second, unrelated repository whose content the diff does not match.
+    let other = repo_with(&[("other.txt", "x\n")]);
+
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args([
+            "select",
+            "1",
+            "--verify-result-diff-git",
+            "-C",
+            target.path().to_str().unwrap(),
+        ])
+        .env("GIT_DIR", other.path().join(".git").to_str().unwrap())
+        .env("GIT_WORK_TREE", other.path().to_str().unwrap())
+        .write_stdin(diff)
+        .assert()
+        .success();
 }

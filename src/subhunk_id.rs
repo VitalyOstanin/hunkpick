@@ -65,7 +65,14 @@ pub fn subhunk_hash(file: &FileDiff, sub: &Hunk) -> u64 {
 /// surrounding context changes (e.g. after a neighbouring sub-hunk is staged and the hunk is
 /// re-split). Byte-identical changes therefore share an id; see [`subhunk_hash`].
 pub fn subhunk_id(file: &FileDiff, sub: &Hunk) -> String {
-    format!("{:016x}", subhunk_hash(file, sub))
+    format_id(subhunk_hash(file, sub))
+}
+
+/// Render a raw [`subhunk_hash`] value in the canonical id spelling: 16 lowercase hex digits.
+/// The single place the width and case are defined, so a caller holding a precomputed hash
+/// (`list --json` reuses one per sub-hunk) cannot drift from [`subhunk_id`].
+pub fn format_id(hash: u64) -> String {
+    format!("{hash:016x}")
 }
 
 #[cfg(test)]
@@ -83,6 +90,7 @@ mod tests {
     fn file(new_path: &str) -> FileDiff {
         FileDiff {
             headers: Vec::new(),
+            trailer: Vec::new(),
             old_path: Some(new_path.as_bytes().to_vec()),
             new_path: Some(new_path.as_bytes().to_vec()),
             content: FileContent::Text(Vec::new()),

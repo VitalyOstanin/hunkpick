@@ -3,8 +3,8 @@
 mod common;
 
 use assert_cmd::Command;
+use common::git_output;
 use predicates::prelude::*;
-use std::process::Command as Sys;
 
 // ---------------------------------------------------------------------------
 // 1. rename_is_preserved
@@ -27,12 +27,7 @@ fn rename_is_preserved() {
     std::fs::write(&new_path, "line1\nline2\nline3\nline4\nline5_changed\n").unwrap();
     common::sys(&dir, &["add", "-A"]);
 
-    let out = Sys::new("git")
-        .args(["diff", "--staged", "-M"])
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
-    let diff = String::from_utf8(out.stdout).unwrap();
+    let diff = git_output(&dir, &["diff", "--staged", "-M"]);
     assert!(!diff.is_empty(), "staged diff must be non-empty");
 
     if diff.contains("rename from") {
@@ -331,4 +326,224 @@ fn plain_non_git_diff() {
         .assert()
         .success()
         .stdout(predicate::str::starts_with("--- "));
+}
+
+// ---------------------------------------------------------------------------
+// 8. deleted_file_is_listed_under_its_old_name
+// ---------------------------------------------------------------------------
+
+/// A deletion has `+++ /dev/null`. The listing must name the file by its old path:
+/// several deletions in one diff would otherwise be indistinguishable, and `/dev/null`
+/// is useless as a selector.
+#[test]
+fn deleted_file_is_listed_under_its_old_name() {
+    let dir = common::repo_with(&[("gone.txt", "x\ny\n"), ("kept.txt", "k\n")]);
+    std::fs::remove_file(dir.path().join("gone.txt")).unwrap();
+    let diff = git_output(&dir, &["diff"]);
+    assert!(diff.contains("+++ /dev/null"), "deletion diff expected");
+
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["list"])
+        .write_stdin(diff.clone())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("gone.txt"))
+        .stdout(predicate::str::contains("/dev/null").not());
+
+    // The old name also works as a selector.
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "gone.txt:1"])
+        .write_stdin(diff)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("-x"));
+}
+
+// ---------------------------------------------------------------------------
+// 9. format_patch_signature_survives
+// ---------------------------------------------------------------------------
+
+/// `git format-patch` ends its output with "-- " and the git version, after the last hunk.
+/// Those lines must stay after the hunk in the result, not move above it.
+#[test]
+fn format_patch_signature_survives() {
+    let dir = common::repo_with(&[("f", "a\nb\nc\n")]);
+    std::fs::write(dir.path().join("f"), "a\nB\nc\n").unwrap();
+    common::sys(&dir, &["commit", "-qam", "change"]);
+    let patch = git_output(&dir, &["format-patch", "-1", "--stdout"]);
+    assert!(patch.contains("\n-- \n"), "signature expected in patch");
+
+    let stdout = Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "*"])
+        .write_stdin(patch)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(stdout).unwrap();
+    let hunk_at = text.find("@@ ").expect("hunk in output");
+    let sig_at = text.find("\n-- \n").expect("signature in output");
+    assert!(sig_at > hunk_at, "signature must follow the hunk: {text}");
+}
+
+// ---------------------------------------------------------------------------
+// 10. binary_file_is_addressable_in_a_multi_file_diff
+// ---------------------------------------------------------------------------
+
+/// A binary file's entry has no `---`/`+++`, so its name comes from the `diff --git` line.
+/// Without it the entry is unaddressable in a multi-file diff, where a path is mandatory.
+#[test]
+fn binary_file_is_addressable_in_a_multi_file_diff() {
+    let dir = common::repo_with(&[("text.txt", "text\n")]);
+    std::fs::write(dir.path().join("bin.dat"), [0u8, 1, 2, b'x']).unwrap();
+    common::sys(&dir, &["add", "bin.dat"]);
+    common::sys(&dir, &["commit", "-qm", "add binary"]);
+    std::fs::write(dir.path().join("bin.dat"), [0u8, 1, 3, b'y']).unwrap();
+    let diff = common::diff_after(&dir, &[("text.txt", "TEXT\n")]);
+    assert!(diff.contains("Binary files"), "binary entry expected");
+
+    let stdout = Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "bin.dat:*", "text.txt:1"])
+        .write_stdin(diff.clone())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8_lossy(&stdout).into_owned();
+    assert!(
+        text.contains("Binary files"),
+        "binary entry emitted: {text}"
+    );
+    assert!(text.contains("+TEXT"), "text change emitted: {text}");
+
+    // The listing names the binary file instead of leaving the line anonymous.
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["list"])
+        .write_stdin(diff)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bin.dat"));
+}
+
+// ---------------------------------------------------------------------------
+// 11. quoted_non_ascii_path_is_addressable
+// ---------------------------------------------------------------------------
+
+/// With git's default `core.quotePath` a non-ASCII name is written quoted and C-escaped.
+/// The selector must accept the real name, and the emitted diff must keep the original bytes.
+///
+/// Unix-only: on Windows the file name reaches git through a UTF-16 path and the octal
+/// escaping this test asserts on is not what git writes there.
+#[test]
+#[cfg(unix)]
+fn quoted_non_ascii_path_is_addressable() {
+    let dir = common::repo_with(&[("é.txt", "a\nb\n")]);
+    let diff = common::diff_after(&dir, &[("é.txt", "a\nB\n")]);
+    assert!(
+        diff.contains("\\303\\251"),
+        "quoted path expected in git output: {diff}"
+    );
+
+    let stdout = Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "é.txt:1"])
+        .write_stdin(diff.clone())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8_lossy(&stdout).into_owned();
+    assert!(
+        text.contains("\\303\\251"),
+        "emitted diff keeps the original spelling: {text}"
+    );
+
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["list"])
+        .write_stdin(diff)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("é.txt"));
+}
+
+// ---------------------------------------------------------------------------
+// 12. rename_only_entry_is_selectable_with_star
+// ---------------------------------------------------------------------------
+
+/// A pure rename (or a mode change) is a diff entry with no hunks. `*` must take such an
+/// entry whole, the way it takes a binary file, instead of reporting an empty selection.
+#[test]
+fn rename_only_entry_is_selectable_with_star() {
+    let diff = "\
+diff --git a/old b/new
+similarity index 100%
+rename from old
+rename to new
+";
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "*"])
+        .write_stdin(diff)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rename from old"))
+        .stdout(predicate::str::contains("rename to new"));
+}
+
+// ---------------------------------------------------------------------------
+// 13. path_with_invalid_utf8_is_addressable
+// ---------------------------------------------------------------------------
+
+/// A file name that is not valid UTF-8 (legal on Unix) must still be addressable: the diff
+/// carries the raw bytes, so the selector has to as well. Rejecting the argument as
+/// "invalid UTF-8" would make such a file unreachable by name in a multi-file diff.
+///
+/// Unix-only: Windows paths cannot hold arbitrary bytes.
+#[test]
+#[cfg(unix)]
+fn path_with_invalid_utf8_is_addressable() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let raw: Vec<u8> = b"bad\xffname.txt".to_vec();
+    let os_name = OsString::from_vec(raw.clone());
+
+    let dir = common::repo_with(&[]);
+    std::fs::write(dir.path().join(&os_name), "a\nb\n").unwrap();
+    common::sys(&dir, &["add", "-A"]);
+    common::sys(&dir, &["commit", "-qm", "add"]);
+    std::fs::write(dir.path().join(&os_name), "a\nB\n").unwrap();
+    // `core.quotePath=false` keeps the raw bytes in the diff rather than octal escapes.
+    let diff = common::git_output_bytes(&dir, &["-c", "core.quotePath=false", "diff"]);
+    assert!(!diff.is_empty(), "diff over the odd name must be non-empty");
+
+    let mut selector = raw.clone();
+    selector.extend_from_slice(b":1");
+    let stdout = Command::cargo_bin("hunkpick")
+        .unwrap()
+        .arg("select")
+        .arg(OsString::from_vec(selector))
+        .write_stdin(diff)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        stdout.windows(raw.len()).any(|w| w == raw.as_slice()),
+        "emitted diff keeps the original path bytes"
+    );
+    assert!(
+        String::from_utf8_lossy(&stdout).contains("+B"),
+        "the addressed change is emitted"
+    );
 }

@@ -7,7 +7,7 @@ use predicates::prelude::*;
 
 /// A unified diff with two separate single-line changes in one hunk,
 /// separated by a context line — produces two auto-split sub-hunks.
-const TWO_CHANGE_DIFF: &str = "\
+const TWO_CHANGES: &str = "\
 diff --git a/f b/f
 --- a/f
 +++ b/f
@@ -31,7 +31,7 @@ fn select_emits_chosen_subhunk_only() {
     Command::cargo_bin("hunkpick")
         .unwrap()
         .args(["select", "1"])
-        .write_stdin(TWO_CHANGE_DIFF)
+        .write_stdin(TWO_CHANGES)
         .assert()
         .success()
         .stdout(predicate::str::contains("+B"))
@@ -40,7 +40,7 @@ fn select_emits_chosen_subhunk_only() {
     Command::cargo_bin("hunkpick")
         .unwrap()
         .args(["select", "2"])
-        .write_stdin(TWO_CHANGE_DIFF)
+        .write_stdin(TWO_CHANGES)
         .assert()
         .success()
         .stdout(predicate::str::contains("+D"))
@@ -52,7 +52,7 @@ fn select_range() {
     Command::cargo_bin("hunkpick")
         .unwrap()
         .args(["select", "1-2"])
-        .write_stdin(TWO_CHANGE_DIFF)
+        .write_stdin(TWO_CHANGES)
         .assert()
         .success()
         .stdout(predicate::str::contains("+B"))
@@ -68,7 +68,7 @@ fn list_human_shows_indices() {
     Command::cargo_bin("hunkpick")
         .unwrap()
         .arg("list")
-        .write_stdin(TWO_CHANGE_DIFF)
+        .write_stdin(TWO_CHANGES)
         .assert()
         .success()
         .stdout(predicate::str::contains("[1]"))
@@ -81,7 +81,7 @@ fn list_json_is_valid() {
     let output = Command::cargo_bin("hunkpick")
         .unwrap()
         .args(["list", "--json"])
-        .write_stdin(TWO_CHANGE_DIFF)
+        .write_stdin(TWO_CHANGES)
         .assert()
         .success()
         .get_output()
@@ -111,7 +111,7 @@ fn split_replaces_hunk_with_pieces() {
     let stdout = Command::cargo_bin("hunkpick")
         .unwrap()
         .args(["split", "1", "--at", "3"])
-        .write_stdin(TWO_CHANGE_DIFF)
+        .write_stdin(TWO_CHANGES)
         .assert()
         .success()
         .get_output()
@@ -119,14 +119,12 @@ fn split_replaces_hunk_with_pieces() {
         .clone();
 
     let text = std::str::from_utf8(&stdout).unwrap();
-    let at_count = text.matches("@@").count();
-    // Each @@ appears twice per hunk header line (opening and closing @@), so two hunks = 4.
-    // But `@@` also ends the header: count distinct @@ -... +... @@ occurrences instead.
+    // Count header lines, not `@@` occurrences: a header opens and closes with `@@`.
     let hunk_lines: Vec<&str> = text.lines().filter(|l| l.starts_with("@@")).collect();
     assert_eq!(
         hunk_lines.len(),
         2,
-        "expected 2 @@ hunk header lines, got: {at_count}"
+        "expected 2 @@ hunk header lines, got: {text}"
     );
 }
 
@@ -139,7 +137,7 @@ fn bad_selector_exits_2() {
     Command::cargo_bin("hunkpick")
         .unwrap()
         .args(["select", "nope:x"])
-        .write_stdin(TWO_CHANGE_DIFF)
+        .write_stdin(TWO_CHANGES)
         .assert()
         .failure()
         .code(2);
@@ -151,7 +149,7 @@ fn empty_selection_exits_2() {
     Command::cargo_bin("hunkpick")
         .unwrap()
         .arg("select")
-        .write_stdin(TWO_CHANGE_DIFF)
+        .write_stdin(TWO_CHANGES)
         .assert()
         .failure()
         .code(2);
@@ -162,7 +160,7 @@ fn out_of_range_index_exits_2() {
     Command::cargo_bin("hunkpick")
         .unwrap()
         .args(["select", "9"])
-        .write_stdin(TWO_CHANGE_DIFF)
+        .write_stdin(TWO_CHANGES)
         .assert()
         .failure()
         .code(2);
@@ -174,7 +172,7 @@ fn dash_c_requires_git_flag() {
     Command::cargo_bin("hunkpick")
         .unwrap()
         .args(["select", "1", "-C", "."])
-        .write_stdin(TWO_CHANGE_DIFF)
+        .write_stdin(TWO_CHANGES)
         .assert()
         .failure()
         .code(2)
@@ -186,7 +184,7 @@ fn no_verify_internal_flag_accepted() {
     Command::cargo_bin("hunkpick")
         .unwrap()
         .args(["select", "1", "--no-verify-result-diff-internal"])
-        .write_stdin(TWO_CHANGE_DIFF)
+        .write_stdin(TWO_CHANGES)
         .assert()
         .success()
         .stdout(predicate::str::contains("+B"));
@@ -304,4 +302,174 @@ fn select_whole_and_lineset_of_same_subhunk_exits_2() {
         .failure()
         .code(2)
         .stderr(predicate::str::contains("sub-hunk 1"));
+}
+
+// ---------------------------------------------------------------------------
+// input validation
+// ---------------------------------------------------------------------------
+
+/// A hunk header that disagrees with its body is a defect of the INPUT diff: it must be
+/// reported as a usage error (exit 2) in prose, not as a verification failure of hunkpick's
+/// own result (exit 70) with a Debug dump of internal fields.
+#[test]
+fn inconsistent_input_header_is_a_usage_error() {
+    let diff = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,3 +1,3 @@
+ a
+-b
++B
+";
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "1"])
+        .write_stdin(diff)
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("sub-hunk 1"))
+        .stderr(predicate::str::contains("hunk_index").not())
+        .stderr(predicate::str::contains("CountMismatch").not());
+}
+
+/// Line numbers close to u32::MAX come straight from the input header. Adding them up must
+/// not overflow: a debug build panicked with exit 101, outside the documented exit codes.
+#[test]
+fn huge_line_numbers_do_not_overflow() {
+    let diff = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -4294967295,2 +4294967295,2 @@
+ a
+-b
++B
+";
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "1"])
+        .write_stdin(diff)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "@@ -4294967295,2 +4294967295,2 @@",
+        ));
+}
+
+/// A closed downstream reader (`hunkpick list | head`) is the normal end of a filter's work.
+/// It must not be reported as an I/O failure: that breaks `set -o pipefail` pipelines.
+#[test]
+fn closed_downstream_pipe_is_not_an_error() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command as Sys, Stdio};
+
+    // Larger than a pipe buffer, so the write cannot complete before the reader goes away.
+    let mut diff = String::from("diff --git a/f b/f\n--- a/f\n+++ b/f\n");
+    for i in 0..4000 {
+        diff.push_str(&format!(
+            "@@ -{n},1 +{n},1 @@\n-a{i}\n+b{i}\n",
+            n = i * 10 + 1
+        ));
+    }
+
+    let mut child = Sys::new(assert_cmd::cargo::cargo_bin("hunkpick"))
+        .arg("list")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut stdin = child.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(diff.as_bytes());
+    });
+
+    // Read one line, then drop the pipe — the child's next write gets EPIPE.
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    drop(reader);
+
+    let out = child.wait_with_output().unwrap();
+    let _ = writer.join();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "exit status {:?}, stderr: {stderr}",
+        out.status.code()
+    );
+    assert!(
+        !stderr.contains("Broken pipe"),
+        "no I/O diagnostic expected: {stderr}"
+    );
+}
+
+/// Auto-splitting a hunk with many change runs must stay linear in their number. Recomputing
+/// the prefix tally per sub-hunk made this quadratic; at 20 000 runs the difference is between
+/// a fraction of a second and the test profile's slow-test timeout.
+#[test]
+fn many_change_runs_split_without_quadratic_blowup() {
+    const RUNS: usize = 20_000;
+    let mut diff = format!(
+        "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,{n} +1,{n} @@\n",
+        n = RUNS * 2
+    );
+    for i in 0..RUNS {
+        diff.push_str(&format!(" ctx{i}\n-old{i}\n+new{i}\n"));
+    }
+
+    let stdout = Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["list", "--json"])
+        .write_stdin(diff)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(stdout).unwrap();
+    assert_eq!(
+        text.matches("\"index\"").count(),
+        RUNS,
+        "one sub-hunk per change run"
+    );
+}
+
+/// `split` and `select` must treat new-side anchors the same way: a diff carved out of a
+/// larger one carries anchors of that larger diff, and both commands recompute them.
+#[test]
+fn split_recomputes_new_side_anchors_like_select() {
+    let diff = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -17,5 +18,5 @@
+ a
+-b
++B
+ c
+-d
++D
+ e
+";
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["split", "1", "--at", "20"])
+        .write_stdin(diff)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("@@ -17,3 +17,3 @@"))
+        .stdout(predicate::str::contains("+18,").not());
+
+    Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "1"])
+        .write_stdin(diff)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("@@ -17,3 +17,3 @@"));
 }

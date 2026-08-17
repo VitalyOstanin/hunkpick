@@ -5,21 +5,9 @@
 mod common;
 
 use assert_cmd::Command;
+use common::run_ok;
 use predicates::prelude::*;
 use serde_json::Value;
-
-/// Run hunkpick, assert success, return stdout bytes.
-fn run_ok(args: &[&str], stdin: &str) -> Vec<u8> {
-    Command::cargo_bin("hunkpick")
-        .unwrap()
-        .args(args)
-        .write_stdin(stdin.to_string())
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone()
-}
 
 /// Content id of the sub-hunk at `path:index` (1-based) from `list --json`.
 fn id_of(diff: &str, path: &str, index: u64) -> String {

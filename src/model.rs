@@ -1,12 +1,18 @@
+/// What one body line of a hunk does to the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineKind {
+    /// Unchanged line, present on both sides (` ` marker).
     Context,
+    /// Line the diff adds (`+` marker).
     Add,
+    /// Line the diff removes (`-` marker).
     Del,
 }
 
+/// One body line of a hunk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {
+    /// Whether the line is context, an addition or a deletion.
     pub kind: LineKind,
     /// Content without the leading +/-/space marker and without the trailing '\n'.
     /// A trailing '\r' (CRLF input) is preserved here. Stored as raw bytes so any input
@@ -16,46 +22,75 @@ pub struct Line {
     pub no_newline: bool,
 }
 
+/// One hunk: the `@@ -old_start,old_lines +new_start,new_lines @@ section` header and its body.
+/// After auto-splitting, a "hunk" is a sub-hunk — the unit hunkpick addresses and emits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hunk {
+    /// First line of the hunk on the old side, 1-based.
     pub old_start: u32,
+    /// How many old-side lines the hunk covers (context + deletions).
     pub old_lines: u32,
+    /// First line of the hunk on the new side, 1-based. Not independent: it follows from the
+    /// old side plus what the hunks before it in the same file change (see [`crate::renumber`]).
     pub new_start: u32,
+    /// How many new-side lines the hunk covers (context + additions).
     pub new_lines: u32,
     /// Text after the second `@@` on the hunk header (without leading space). May be empty.
     pub section: Vec<u8>,
+    /// Body lines in file order.
     pub lines: Vec<Line>,
 }
 
+/// The body of one file entry: hunks for a text file, raw lines for a binary one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileContent {
+    /// Hunks of a text file, in file order. May be empty for a header-only entry (a pure
+    /// rename or a mode change).
     Text(Vec<Hunk>),
     /// Binary patch body lines, stored verbatim (without trailing '\n').
     Binary(Vec<Vec<u8>>),
 }
 
+/// One file entry of a diff: its header lines, its paths and its body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileDiff {
     /// Raw header lines before the first hunk, verbatim, without trailing '\n'.
     pub headers: Vec<Vec<u8>>,
+    /// Raw lines that follow a hunk body rather than precede the first hunk: a blank separator
+    /// between hunks, the `-- \n<version>` signature `git format-patch` appends, or trailing
+    /// junk. Each is paired with the number of hunks seen before it, so emitting restores its
+    /// place. Kept apart from `headers` because emitting such a line up front moves it above
+    /// the first `@@` and `git apply` then rejects the whole diff as garbage.
+    pub trailer: Vec<(usize, Vec<u8>)>,
+    /// Old-side path with the `a/` prefix stripped and git quoting decoded; `None` until a
+    /// `--- ` or `diff --git` line supplies it. Raw bytes, so a non-UTF-8 name round-trips.
     pub old_path: Option<Vec<u8>>,
+    /// New-side path, in the same form as [`FileDiff::old_path`].
     pub new_path: Option<Vec<u8>>,
+    /// The file's body.
     pub content: FileContent,
 }
 
+/// A parsed unified diff: its file entries in input order.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Patch {
+    /// File entries in the order they appear in the diff.
     pub files: Vec<FileDiff>,
 }
 
 impl FileDiff {
     /// Best-effort display path: new path, else old path, decoded lossily. Empty if neither.
+    /// `/dev/null` is skipped: it is the placeholder git writes for the missing side of a
+    /// creation or deletion, so the real name lives on the other side.
     /// For display and error messages only; the emitted diff keeps the original path bytes.
     pub fn display_path(&self) -> String {
-        self.new_path
-            .as_deref()
-            .or(self.old_path.as_deref())
-            .map(|b| String::from_utf8_lossy(b).into_owned())
+        let real = |p: &Option<Vec<u8>>| match p.as_deref() {
+            Some(b"/dev/null") | None => None,
+            Some(b) => Some(b.to_vec()),
+        };
+        real(&self.new_path)
+            .or_else(|| real(&self.old_path))
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_default()
     }
 }
@@ -102,6 +137,20 @@ impl Hunk {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_path_of_a_deletion_is_the_old_path() {
+        // A deleted file has `+++ /dev/null`; showing that as the file's name makes every
+        // deletion in a listing look alike and is useless as a selector.
+        let f = FileDiff {
+            headers: Vec::new(),
+            trailer: Vec::new(),
+            old_path: Some(b"f2".to_vec()),
+            new_path: Some(b"/dev/null".to_vec()),
+            content: FileContent::Text(Vec::new()),
+        };
+        assert_eq!(f.display_path(), "f2");
+    }
 
     #[test]
     fn change_counts_counts_add_and_del() {

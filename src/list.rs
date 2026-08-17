@@ -1,6 +1,9 @@
+use crate::emit::fmt_range;
 use crate::model::*;
 use crate::select::build_view;
+use crate::subhunk_id::{format_id, subhunk_hash, subhunk_id};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 #[derive(Serialize)]
@@ -62,8 +65,8 @@ struct JsonFile {
 }
 
 fn header_string(h: &Hunk) -> String {
-    let old = crate::emit::fmt_range(h.old_start, h.old_lines);
-    let new = crate::emit::fmt_range(h.new_start, h.new_lines);
+    let old = fmt_range(h.old_start, h.old_lines);
+    let new = fmt_range(h.new_start, h.new_lines);
     let mut s = format!("@@ -{old} +{new} @@");
     if !h.section.is_empty() {
         s.push(' ');
@@ -89,69 +92,96 @@ fn preview(h: &Hunk) -> String {
     String::new()
 }
 
+/// The addressable sub-hunks of `patch` as pretty-printed JSON: an array of files, each with
+/// its sub-hunks (1-based `index`, content `id`, `id_count`, line ranges, changed lines).
 pub fn list_json(patch: &Patch) -> String {
-    use crate::subhunk_id::subhunk_hash;
     let view = build_view(patch);
     // Hash each sub-hunk once, keeping the per-file hashes alongside the view so the second
-    // pass reuses them instead of recomputing. `hashes[vi][si]` is the hash of the `si`-th
-    // sub-hunk of the `vi`-th view entry.
+    // pass reuses them instead of recomputing. `hashes[fi][si]` is the hash of the `si`-th
+    // sub-hunk of file `fi`.
     let hashes: Vec<Vec<u64>> = view
         .iter()
-        .map(|(fi, subs)| {
-            let f = &patch.files[*fi];
-            subs.iter().map(|h| subhunk_hash(f, h)).collect()
-        })
+        .zip(&patch.files)
+        .map(|(subs, f)| subs.iter().map(|h| subhunk_hash(f, h)).collect())
         .collect();
     // Histogram of content hashes across the whole patch, so each sub-hunk can report how
     // many sub-hunks share its id (`id_count`).
-    let mut counts: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    let mut counts: HashMap<u64, usize> = HashMap::new();
     for file_hashes in &hashes {
         for hash in file_hashes {
             *counts.entry(*hash).or_insert(0) += 1;
         }
     }
-    let mut files = Vec::new();
-    for (vi, (fi, subs)) in view.iter().enumerate() {
-        let f = &patch.files[*fi];
-        let binary = matches!(f.content, FileContent::Binary(_));
-        let hunks = subs
-            .iter()
-            .enumerate()
-            .map(|(i, h)| {
-                let (added, deleted) = h.change_counts();
-                let hash = hashes[vi][i];
-                JsonHunk {
-                    index: i + 1,
-                    id: format!("{hash:016x}"),
-                    id_count: counts[&hash],
-                    old_start: h.old_start,
-                    old_lines: h.old_lines,
-                    new_start: h.new_start,
-                    new_lines: h.new_lines,
-                    added,
-                    deleted,
-                    addition_only: addition_only(h),
-                    changed_lines: changed_lines(h),
-                    header: header_string(h),
-                    preview: preview(h),
-                }
-            })
-            .collect();
-        files.push(JsonFile {
-            path: f.display_path(),
-            binary,
-            hunks,
-        });
-    }
+    let files: Vec<JsonFile> = view
+        .iter()
+        .enumerate()
+        .map(|(fi, subs)| {
+            let f = &patch.files[fi];
+            JsonFile {
+                path: f.display_path(),
+                binary: matches!(f.content, FileContent::Binary(_)),
+                hunks: subs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, h)| json_hunk(h, i, hashes[fi][i], &counts))
+                    .collect(),
+            }
+        })
+        .collect();
     // Infallible in practice: `JsonFile` serializes owned strings, integers and bools with
     // no map keys or custom `Serialize` that could error. `expect` documents that invariant.
     serde_json::to_string_pretty(&files).expect("serializing the JSON hunk list cannot fail")
+}
+
+/// One sub-hunk as it appears in `list --json`: `index` is 1-based (the number selectors use),
+/// `hash` is its precomputed content hash and `counts` the patch-wide histogram behind
+/// `id_count`.
+fn json_hunk(h: &Hunk, index: usize, hash: u64, counts: &HashMap<u64, usize>) -> JsonHunk {
+    let (added, deleted) = h.change_counts();
+    JsonHunk {
+        index: index + 1,
+        id: format_id(hash),
+        id_count: counts[&hash],
+        old_start: h.old_start,
+        old_lines: h.old_lines,
+        new_start: h.new_start,
+        new_lines: h.new_lines,
+        added,
+        deleted,
+        addition_only: addition_only(h),
+        changed_lines: changed_lines(h),
+        header: header_string(h),
+        preview: preview(h),
+    }
 }
 
 // SGR (Select Graphic Rendition) parameter codes used for the human-readable listing.
 const SGR_BOLD: &str = "1";
 const SGR_RED: &str = "31";
 const SGR_GREEN: &str = "32";
+
+/// Escape what a terminal would act on rather than show. The listing is what an operator reads
+/// before picking a sub-hunk, and its text comes from the diff being filtered: an escape
+/// sequence in that content could repaint or rewrite the listing, and a bidirectional
+/// override could reorder it. Escaped as `\xNN` / `\u{NNNN}`, so the text stays readable.
+/// The JSON listing needs no such pass — serde escapes control characters itself.
+fn sanitize(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            // C0 controls (including ESC and the tab a terminal would expand), and DEL.
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                let _ = write!(out, "\\x{:02x}", c as u32);
+            }
+            // Bidirectional formatting: can visually reorder the rest of the line.
+            '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => {
+                let _ = write!(out, "\\u{{{:04x}}}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
 
 fn paint(s: &str, code: &str, color: bool) -> String {
     if color {
@@ -161,12 +191,15 @@ fn paint(s: &str, code: &str, color: bool) -> String {
     }
 }
 
+/// The addressable sub-hunks of `patch` for a terminal: one line per sub-hunk with its index,
+/// content id, `@@` header, change counts, the `[+add]` marker and a preview of the first
+/// changed line. Control bytes from the diff are escaped; `color` adds SGR sequences.
 pub fn list_human(patch: &Patch, color: bool) -> String {
     let view = build_view(patch);
     let mut out = String::new();
-    for (fi, subs) in &view {
-        let f = &patch.files[*fi];
-        out.push_str(&f.display_path());
+    for (fi, subs) in view.iter().enumerate() {
+        let f = &patch.files[fi];
+        out.push_str(&sanitize(&f.display_path()));
         if matches!(f.content, FileContent::Binary(_)) {
             out.push_str(" (binary)\n");
             continue;
@@ -175,8 +208,8 @@ pub fn list_human(patch: &Patch, color: bool) -> String {
         for (i, h) in subs.iter().enumerate() {
             let (added, deleted) = h.change_counts();
             let idx = paint(&format!("[{}]", i + 1), SGR_BOLD, color);
-            let id = crate::subhunk_id::subhunk_id(f, h);
-            let pv = preview(h);
+            let id = subhunk_id(f, h);
+            let pv = sanitize(&preview(h));
             let pv = if pv.starts_with('+') {
                 paint(&pv, SGR_GREEN, color)
             } else if pv.starts_with('-') {
@@ -190,7 +223,7 @@ pub fn list_human(patch: &Patch, color: bool) -> String {
             let _ = writeln!(
                 out,
                 "  {idx} {id} {}  +{added} -{deleted}{marker}  {pv}",
-                header_string(h)
+                sanitize(&header_string(h))
             );
         }
     }
@@ -201,8 +234,35 @@ pub fn list_human(patch: &Patch, color: bool) -> String {
 mod tests {
     use super::*;
     use crate::parser::parse;
+    use crate::select::build_view;
 
-    const MULTI: &str = "\
+    #[test]
+    fn human_escapes_terminal_control_sequences() {
+        // Content of the diff being filtered must not be able to repaint or reorder the
+        // listing the operator reads.
+        let src = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1 +1 @@
+-\x1b[31mred\u{202e}reversed
++plain
+";
+        let p = parse(src.as_bytes()).unwrap();
+        let out = list_human(&p, false);
+        assert!(
+            !out.contains('\u{1b}'),
+            "no raw ESC in the listing: {out:?}"
+        );
+        assert!(!out.contains('\u{202e}'), "no bidi override: {out:?}");
+        assert!(out.contains("\\x1b"), "escaped ESC expected: {out:?}");
+        assert!(
+            out.contains("\\u{202e}"),
+            "escaped override expected: {out:?}"
+        );
+    }
+
+    const TWO_CHANGES: &str = "\
 diff --git a/f b/f
 --- a/f
 +++ b/f
@@ -235,7 +295,7 @@ diff --git a/f b/f
 
     #[test]
     fn json_id_count_is_one_for_unique_ids() {
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
         assert_eq!(v[0]["hunks"][0]["id_count"], 1);
         assert_eq!(v[0]["hunks"][1]["id_count"], 1);
@@ -256,7 +316,7 @@ diff --git a/f b/f
 
     #[test]
     fn json_has_two_subhunks() {
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         let j = list_json(&p);
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v[0]["path"], "f");
@@ -266,22 +326,22 @@ diff --git a/f b/f
 
     #[test]
     fn json_includes_subhunk_id() {
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         let j = list_json(&p);
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         let id = v[0]["hunks"][0]["id"].as_str().expect("id field present");
         assert_eq!(id.len(), 16, "id must be 16 hex chars");
-        let view = crate::select::build_view(&p);
-        let expected = crate::subhunk_id::subhunk_id(&p.files[0], &view[0].1[0]);
+        let view = build_view(&p);
+        let expected = subhunk_id(&p.files[0], &view[0][0]);
         assert_eq!(id, expected, "json id must match the canonical sub-hunk id");
     }
 
     #[test]
     fn human_shows_subhunk_id() {
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         let out = list_human(&p, false);
-        let view = crate::select::build_view(&p);
-        let id = crate::subhunk_id::subhunk_id(&p.files[0], &view[0].1[0]);
+        let view = build_view(&p);
+        let id = subhunk_id(&p.files[0], &view[0][0]);
         assert!(
             out.contains(&id),
             "human output must contain id {id}:\n{out}"
@@ -290,7 +350,7 @@ diff --git a/f b/f
 
     #[test]
     fn human_lists_indices() {
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         let out = list_human(&p, false);
         assert!(out.contains("f"));
         assert!(out.contains("[1]"));
@@ -316,7 +376,7 @@ new file mode 100644
 
     #[test]
     fn json_addition_only_false_for_mixed() {
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
         assert_eq!(v[0]["hunks"][0]["addition_only"], false);
     }
@@ -333,7 +393,7 @@ new file mode 100644
 
     #[test]
     fn human_no_marker_for_mixed() {
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         let out = list_human(&p, false);
         assert!(
             !out.contains("[+add]"),
@@ -343,9 +403,9 @@ new file mode 100644
 
     #[test]
     fn json_lists_changed_lines_with_indices() {
-        // The first sub-hunk of MULTI is the b->B change: one deletion, one addition, numbered
+        // The first sub-hunk of TWO_CHANGES is the b->B change: one deletion, one addition, numbered
         // 1 and 2 in body order (deletion first).
-        let p = parse(MULTI.as_bytes()).unwrap();
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
         let cl = &v[0]["hunks"][0]["changed_lines"];
         assert_eq!(cl.as_array().unwrap().len(), 2);

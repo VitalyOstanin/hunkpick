@@ -2,14 +2,20 @@ use crate::model::*;
 use std::collections::BTreeSet;
 use std::fmt;
 
+/// Why a hunk could not be split as asked. Every variant is a usage error (exit code 2).
 #[derive(Debug, PartialEq, Eq)]
 pub enum SplitError {
+    /// A `--at` cut point names a new-file line that carries a change; only a context line can
+    /// be cut at. Carries the offending line number.
     NotAContextLine(u32),
+    /// A `--at` cut point names a new-file line outside the hunk. Carries it.
     OutOfRange(u32),
     /// An `INDEX@L<set>` selection references a changed line outside `1..=changed` of the
     /// sub-hunk. Carries the offending 1-based index and the sub-hunk's changed-line count.
     ChangedLineOutOfRange {
+        /// The offending 1-based changed-line index.
         index: usize,
+        /// How many changed lines the sub-hunk actually has.
         changed: usize,
     },
     /// An `INDEX@L<set>` selection resolved to no changed lines (an empty set). A defensive
@@ -36,6 +42,10 @@ impl fmt::Display for SplitError {
     }
 }
 
+/// Lets callers treat it as a boxed [`std::error::Error`], as the Rust API guidelines ask
+/// of a public error type.
+impl std::error::Error for SplitError {}
+
 /// Auto-split a hunk into minimal sub-hunks at context gaps between change runs.
 /// Returns the hunk unchanged (as a single element) if it has zero or one change run.
 ///
@@ -50,6 +60,7 @@ pub fn auto_split_hunk(h: &Hunk) -> Vec<Hunk> {
     }
     let n = h.lines.len();
     let mut result = Vec::with_capacity(runs.len());
+    let mut pre = PrefixCounts::new();
     for ri in 0..runs.len() {
         // First sub-hunk starts at the beginning of the whole hunk.
         // Subsequent sub-hunks start directly at their change run (no shared boundary
@@ -63,7 +74,8 @@ pub fn auto_split_hunk(h: &Hunk) -> Vec<Hunk> {
             runs[ri + 1].0
         };
         let slice = &h.lines[lead_from..trail_to];
-        result.push(rebuild_subhunk(h, slice, lead_from));
+        let counts = pre.upto(&h.lines, lead_from);
+        result.push(rebuild_subhunk(h, slice, lead_from, counts));
     }
     result
 }
@@ -165,39 +177,7 @@ pub fn slice_changed_lines(h: &Hunk, selected: &BTreeSet<usize>) -> Result<Hunk,
             }
         }
     }
-    // A retained (unselected) deletion that sat at EOF became a context line still carrying the
-    // `\ No newline at end of file` flag. If it is no longer the last line — selected additions
-    // follow it — a plain context line is both malformed (a mid-hunk no-newline marker) and wrong:
-    // appending after a no-newline line requires that line to gain a trailing newline. Represent
-    // that the way git does — delete the no-newline line and re-add it with a newline — so the
-    // piece applies. A well-formed diff never carries a no-newline flag on a non-last context
-    // line, so this only ever touches lines this transform just converted from a deletion;
-    // deletions and additions keep their own flags (a valid `-a\No newline +b` at EOF round-trips).
-    let n = lines.len();
-    if lines
-        .iter()
-        .enumerate()
-        .any(|(i, l)| i + 1 < n && matches!(l.kind, LineKind::Context) && l.no_newline)
-    {
-        let mut fixed: Vec<Line> = Vec::with_capacity(lines.len() + 1);
-        for (i, l) in lines.into_iter().enumerate() {
-            if i + 1 < n && matches!(l.kind, LineKind::Context) && l.no_newline {
-                fixed.push(Line {
-                    kind: LineKind::Del,
-                    text: l.text.clone(),
-                    no_newline: true,
-                });
-                fixed.push(Line {
-                    kind: LineKind::Add,
-                    text: l.text,
-                    no_newline: false,
-                });
-            } else {
-                fixed.push(l);
-            }
-        }
-        lines = fixed;
-    }
+    fix_mid_hunk_no_newline(&mut lines);
     let (ctx, add, del) = count_kinds(&lines);
     Ok(Hunk {
         old_start: h.old_start,
@@ -207,6 +187,43 @@ pub fn slice_changed_lines(h: &Hunk, selected: &BTreeSet<usize>) -> Result<Hunk,
         section: h.section.clone(),
         lines,
     })
+}
+
+/// Repair a `\ No newline at end of file` marker that is no longer at the end of the body.
+///
+/// A retained (unselected) deletion that sat at EOF became a context line still carrying the
+/// no-newline flag. If it is no longer the last line — selected additions follow it — a plain
+/// context line is both malformed (a mid-hunk no-newline marker) and wrong: appending after a
+/// no-newline line requires that line to gain a trailing newline. Represent that the way git
+/// does — delete the no-newline line and re-add it with a newline — so the piece applies. A
+/// well-formed diff never carries a no-newline flag on a non-last context line, so this only
+/// ever touches lines [`slice_changed_lines`] just converted from a deletion; deletions and
+/// additions keep their own flags (a valid `-a\No newline +b` at EOF round-trips).
+fn fix_mid_hunk_no_newline(lines: &mut Vec<Line>) {
+    let n = lines.len();
+    let needs_fix =
+        |i: usize, l: &Line| i + 1 < n && matches!(l.kind, LineKind::Context) && l.no_newline;
+    if !lines.iter().enumerate().any(|(i, l)| needs_fix(i, l)) {
+        return;
+    }
+    let mut fixed: Vec<Line> = Vec::with_capacity(n + 1);
+    for (i, l) in std::mem::take(lines).into_iter().enumerate() {
+        if needs_fix(i, &l) {
+            fixed.push(Line {
+                kind: LineKind::Del,
+                text: l.text.clone(),
+                no_newline: true,
+            });
+            fixed.push(Line {
+                kind: LineKind::Add,
+                text: l.text,
+                no_newline: false,
+            });
+        } else {
+            fixed.push(l);
+        }
+    }
+    *lines = fixed;
 }
 
 /// Indices of maximal Add/Del runs as (start, end_exclusive).
@@ -236,6 +253,7 @@ fn change_runs(h: &Hunk) -> Vec<(usize, usize)> {
 fn rebuild_pieces(h: &Hunk, starts: &[usize], ends: &[usize]) -> Vec<Hunk> {
     assert_eq!(starts.len(), ends.len());
     let mut result = Vec::new();
+    let mut pre = PrefixCounts::new();
     for (start, end) in starts.iter().zip(ends.iter()) {
         // Skip empty pieces. A cut on the hunk's last line yields a trailing `start == end`
         // slice that would emit a degenerate `@@ -X,0 +Y,0 @@` stanza git rejects.
@@ -250,26 +268,69 @@ fn rebuild_pieces(h: &Hunk, starts: &[usize], ends: &[usize]) -> Vec<Hunk> {
         if add + del == 0 {
             continue;
         }
-        result.push(rebuild_subhunk(h, slice, *start));
+        let counts = pre.upto(&h.lines, *start);
+        result.push(rebuild_subhunk(h, slice, *start, counts));
     }
     result
 }
 
-/// Build a Hunk from a slice of `h.lines` starting at absolute index `abs_start`,
-/// recomputing old/new start offsets and line counts.
-fn rebuild_subhunk(h: &Hunk, slice: &[Line], abs_start: usize) -> Hunk {
+/// Running per-kind tally of the lines before a given index. Sub-hunks are built in
+/// increasing start order, so the tally advances instead of being recounted from the hunk's
+/// first line for every piece: recounting made auto-splitting quadratic in the number of
+/// change runs (a 1.9 MB one-hunk diff with 64 000 runs took seconds).
+struct PrefixCounts {
+    scanned: usize,
+    ctx: u32,
+    add: u32,
+    del: u32,
+}
+
+impl PrefixCounts {
+    fn new() -> Self {
+        Self {
+            scanned: 0,
+            ctx: 0,
+            add: 0,
+            del: 0,
+        }
+    }
+
+    /// Counts of `lines[..upto]`. `upto` must not go backwards.
+    fn upto(&mut self, lines: &[Line], upto: usize) -> (u32, u32, u32) {
+        debug_assert!(
+            upto >= self.scanned,
+            "sub-hunk starts must be non-decreasing"
+        );
+        for l in &lines[self.scanned..upto] {
+            match l.kind {
+                LineKind::Context => self.ctx += 1,
+                LineKind::Add => self.add += 1,
+                LineKind::Del => self.del += 1,
+            }
+        }
+        self.scanned = upto;
+        (self.ctx, self.add, self.del)
+    }
+}
+
+/// Build a Hunk from a slice of `h.lines` starting at absolute index `abs_start`, whose
+/// preceding lines tally `pre` (context, added, deleted), recomputing old/new start offsets
+/// and line counts.
+fn rebuild_subhunk(h: &Hunk, slice: &[Line], abs_start: usize, pre: (u32, u32, u32)) -> Hunk {
     // Old/new offsets of the slice are the line counts of everything before it; the slice's
     // own old/new lengths are its counts. Context lines advance both sides.
-    let (pre_ctx, pre_add, pre_del) = count_kinds(&h.lines[..abs_start]);
+    let (pre_ctx, pre_add, pre_del) = pre;
     let old_off = pre_ctx + pre_del;
     let new_off = pre_ctx + pre_add;
     let (ctx, add, del) = count_kinds(slice);
     let old_lines = ctx + del;
     let new_lines = ctx + add;
     Hunk {
-        old_start: h.old_start + old_off,
+        // Saturating, like `renumber::anchor`: the starts come from the input header, and a
+        // sum past u32::MAX must clamp rather than wrap on a synthetic diff.
+        old_start: h.old_start.saturating_add(old_off),
         old_lines,
-        new_start: h.new_start + new_off,
+        new_start: h.new_start.saturating_add(new_off),
         new_lines,
         section: if abs_start == 0 {
             h.section.clone()
@@ -283,7 +344,9 @@ fn rebuild_subhunk(h: &Hunk, slice: &[Line], abs_start: usize) -> Hunk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::FileContent;
+    use crate::emit::emit;
+    use crate::gittest::applies_to_file;
+    use crate::model::{FileContent, FileDiff, Patch};
     use crate::parser::parse;
 
     fn hunk(src: &str) -> Hunk {
@@ -295,30 +358,18 @@ mod tests {
     }
 
     /// Reassemble a one-file patch from sub-hunks, as raw bytes, for `git apply --check`.
+    /// Renders through [`emit`] so the pieces are spelled exactly as hunkpick spells them —
+    /// a hand-rolled renderer here would let a rendering bug pass unnoticed.
     fn assemble(subs: &[Hunk]) -> Vec<u8> {
-        let mut diff = b"--- a/f\n+++ b/f\n".to_vec();
-        for s in subs {
-            diff.extend_from_slice(
-                format!(
-                    "@@ -{},{} +{},{} @@\n",
-                    s.old_start, s.old_lines, s.new_start, s.new_lines
-                )
-                .as_bytes(),
-            );
-            for l in &s.lines {
-                diff.push(match l.kind {
-                    LineKind::Context => b' ',
-                    LineKind::Add => b'+',
-                    LineKind::Del => b'-',
-                });
-                diff.extend_from_slice(&l.text);
-                diff.push(b'\n');
-                if l.no_newline {
-                    diff.extend_from_slice(b"\\ No newline at end of file\n");
-                }
-            }
-        }
-        diff
+        emit(&Patch {
+            files: vec![FileDiff {
+                headers: vec![b"--- a/f".to_vec(), b"+++ b/f".to_vec()],
+                trailer: Vec::new(),
+                old_path: Some(b"f".to_vec()),
+                new_path: Some(b"f".to_vec()),
+                content: FileContent::Text(subs.to_vec()),
+            }],
+        })
     }
 
     const TWO_CHANGES: &str = "\
@@ -473,31 +524,11 @@ diff --git a/f b/f
 
     #[test]
     fn explicit_split_combined_applies_via_git() {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
         let h = hunk(TWO_CHANGES);
         let pieces = split_hunk_at(&h, &[3]).unwrap();
         let diff = assemble(&pieces);
-
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f"), "a\nb\nc\nd\ne\n").unwrap();
-        Command::new("git")
-            .arg("init")
-            .arg("-q")
-            .current_dir(&dir)
-            .status()
-            .unwrap();
-        let mut child = Command::new("git")
-            .arg("apply")
-            .arg("--check")
-            .current_dir(&dir)
-            .stdin(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child.stdin.take().unwrap().write_all(&diff).unwrap();
         assert!(
-            child.wait().unwrap().success(),
+            applies_to_file(&diff, "a\nb\nc\nd\ne\n"),
             "git apply --check failed for combined explicit-split patch:\n{}",
             String::from_utf8_lossy(&diff)
         );
@@ -505,32 +536,12 @@ diff --git a/f b/f
 
     #[test]
     fn auto_split_subhunks_apply_via_git() {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
         let h = hunk(TWO_CHANGES);
         let subs = auto_split_hunk(&h);
         // Reassemble a patch with all sub-hunks for file "f".
         let diff = assemble(&subs);
-
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f"), "a\nb\nc\nd\ne\n").unwrap();
-        Command::new("git")
-            .arg("init")
-            .arg("-q")
-            .current_dir(&dir)
-            .status()
-            .unwrap();
-        let mut child = Command::new("git")
-            .arg("apply")
-            .arg("--check")
-            .current_dir(&dir)
-            .stdin(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child.stdin.take().unwrap().write_all(&diff).unwrap();
         assert!(
-            child.wait().unwrap().success(),
+            applies_to_file(&diff, "a\nb\nc\nd\ne\n"),
             "git apply --check failed for split patch:\n{}",
             String::from_utf8_lossy(&diff)
         );
@@ -539,26 +550,7 @@ diff --git a/f b/f
     /// True if the assembled patch of `subs` applies cleanly to a file `f` seeded with
     /// `file_content` in a fresh git repo (`git apply --check`).
     fn git_apply_ok(subs: &[Hunk], file_content: &str) -> bool {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-        let diff = assemble(subs);
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f"), file_content).unwrap();
-        Command::new("git")
-            .arg("init")
-            .arg("-q")
-            .current_dir(&dir)
-            .status()
-            .unwrap();
-        let mut child = Command::new("git")
-            .arg("apply")
-            .arg("--check")
-            .current_dir(&dir)
-            .stdin(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child.stdin.take().unwrap().write_all(&diff).unwrap();
-        child.wait().unwrap().success()
+        applies_to_file(&assemble(subs), file_content)
     }
 
     /// Build a BTreeSet of the given 1-based changed-line indices.
