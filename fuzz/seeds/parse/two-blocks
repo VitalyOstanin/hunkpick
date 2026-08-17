@@ -1,0 +1,12 @@
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,6 +1,6 @@
+ one
+-two
++TWO
+ three
+ four
+-five
++FIVE
+ six

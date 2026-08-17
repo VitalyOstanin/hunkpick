@@ -53,15 +53,35 @@ defect is worth adding to the hand-written tests as well — `proptest-regressio
 generated locally and not committed, because a saved seed says nothing about what broke.
 
 The fuzz targets need nightly (libFuzzer uses `-Z` flags) and a C++ toolchain, so they are not
-part of the normal loop:
+part of the normal loop. Run them the way CI does:
 
 ```sh
-cargo +nightly fuzz run parse -- -max_total_time=60      # one target, one minute
-cargo +nightly fuzz run parse fuzz/artifacts/parse/<id>  # replay a crash
+# One target, one minute, starting from the committed seeds and the token dictionary.
+RUSTUP_TOOLCHAIN=nightly cargo fuzz run --target x86_64-unknown-linux-gnu parse \
+  fuzz/corpus/parse fuzz/seeds/parse \
+  -- -max_total_time=60 -dict=fuzz/dictionaries/diff.dict
+
+# Replay a crash the fuzzer kept.
+RUSTUP_TOOLCHAIN=nightly cargo fuzz run --target x86_64-unknown-linux-gnu parse \
+  fuzz/artifacts/parse/<id>
 ```
 
-CI runs a 60-second smoke pass of each target on every push, and
-[`.github/workflows/fuzz.yml`](.github/workflows/fuzz.yml) runs a longer weekly search that
+Two details in that command are not obvious, and both cost a confusing failure otherwise:
+
+- `RUSTUP_TOOLCHAIN=nightly`, not `cargo +nightly`. [`rust-toolchain.toml`](rust-toolchain.toml)
+  pins the repository to stable and that file wins over an installed toolchain, so cargo-fuzz
+  ends up handing the build to stable rustc, which rejects the `-Z` sanitizer flags.
+- `--target x86_64-unknown-linux-gnu` spelled out. cargo-fuzz defaults to the triple it was
+  itself built for, and the prebuilt binary `cargo binstall cargo-fuzz` installs is a static
+  musl build; ASan cannot work against a statically linked libc, so the default fails with
+  `sanitizer is incompatible with statically linked libc`.
+
+`fuzz/seeds/` holds a committed starting point per target (see
+[`fuzz/seeds/README.md`](fuzz/seeds/README.md)) and `fuzz/dictionaries/diff.dict` the tokens a
+diff is made of; `fuzz/corpus/` is machine-local and grows as the fuzzer works.
+
+CI builds every target on each push (advisory: the nightly it needs is whatever shipped today),
+and [`.github/workflows/fuzz.yml`](.github/workflows/fuzz.yml) runs a search twice a week that
 keeps its corpus between runs.
 
 ## Releases

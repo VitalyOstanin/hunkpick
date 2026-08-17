@@ -11,6 +11,11 @@
 use libfuzzer_sys::fuzz_target;
 use std::ffi::OsString;
 
+/// How many selector lines are taken from the input. A selection is resolved per selector, so an
+/// unbounded list turns a short input into a long run and starves the fuzzer of iterations; eight
+/// is past the point where another selector exercises new code.
+const MAX_SELECTORS: usize = 8;
+
 fuzz_target!(|data: &[u8]| {
     let (diff, rest) = match data.iter().position(|&b| b == 0) {
         Some(i) => (&data[..i], &data[i + 1..]),
@@ -21,8 +26,8 @@ fuzz_target!(|data: &[u8]| {
     };
     let args: Vec<OsString> = rest
         .split(|&b| b == b'\n')
-        .take(8)
-        .map(|a| os_string(a))
+        .take(MAX_SELECTORS)
+        .map(os_string)
         .collect();
     let Ok(selectors) = hunkpick::select::parse_selectors(&args) else {
         return;

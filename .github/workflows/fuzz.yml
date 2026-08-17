@@ -6,8 +6,11 @@ name: Fuzz
 # on it.
 on:
   schedule:
-    # Sunday 03:17 UTC — off the hour, where scheduled-run contention is lower.
-    - cron: '17 3 * * 0'
+    # Sunday and Wednesday, 03:17 UTC — off the hour, where scheduled-run contention is lower.
+    # Twice a week rather than once because GitHub evicts a cache entry untouched for 7 days:
+    # a weekly cadence sits exactly on that threshold, so one skipped or failed run would drop
+    # the corpus and start the next search from nothing.
+    - cron: '17 3 * * 0,3'
   workflow_dispatch:
     inputs:
       minutes:
@@ -31,30 +34,20 @@ jobs:
       fail-fast: false
       matrix:
         target: [parse, roundtrip, selectors]
-    env:
-      # rust-toolchain.toml pins the whole repository to stable, and that file wins over an
-      # installed toolchain: without this override rustup hands cargo-fuzz the stable rustc,
-      # which rejects the `-Z` sanitizer flags libFuzzer needs.
-      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # libFuzzer needs the sanitizer support only nightly ships (`-Z` flags).
-      - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: |
-            .
-            fuzz
-      # The corpus is the memory of previous runs: without it every week re-discovers the
-      # same shallow inputs and never reaches the interesting ones.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: ./.github/actions/fuzz-setup
+      # The corpus is the memory of previous runs: without it every run re-discovers the
+      # same shallow inputs and never reaches the interesting ones. Restore and save are
+      # separate steps on purpose — the combined action skips its save when the job failed,
+      # and the job fails exactly when the fuzzer found something, which is the run whose
+      # inputs are worth keeping most.
+      - name: Restore the corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: fuzz-corpus-${{ matrix.target }}-
-      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
-        with:
-          tool: cargo-fuzz
       # The target triple is spelled out because cargo-fuzz defaults to the triple it was itself
       # built for, and the prebuilt binary is a static musl build. ASan cannot work against a
       # statically linked libc, so that default fails with
@@ -63,7 +56,34 @@ jobs:
         env:
           MINUTES: ${{ github.event.inputs.minutes || '15' }}
           TARGET: ${{ matrix.target }}
-        run: cargo fuzz run --target x86_64-unknown-linux-gnu "$TARGET" -- -max_total_time=$((MINUTES * 60)) -print_final_stats=1
+        # The value reaches the shell through `env:` rather than template expansion, but that is
+        # only half the guard: bash re-expands the contents of a variable inside `$(( ))`, so a
+        # dispatch input of `1[$(...)]` would execute the command. Hence the digits-only check
+        # before any arithmetic — and it rejects an empty value too, which would silently mean
+        # "no time limit".
+        run: |
+          case "$MINUTES" in
+            ''|*[!0-9]*) echo "::error::minutes must be a positive integer, got '$MINUTES'"; exit 1 ;;
+          esac
+          if [ "$MINUTES" -lt 1 ]; then
+            echo "::error::minutes must be at least 1, got '$MINUTES'"
+            exit 1
+          fi
+          # Two corpus directories: new inputs are written to the first, and fuzz/seeds/ is
+          # read-only starting material committed to the repository — a diff of each shape the
+          # parser handles, so a cold run does not spend its budget guessing "diff --git".
+          # The dictionary supplies the same tokens as mutation material.
+          cargo fuzz run --target x86_64-unknown-linux-gnu "$TARGET" \
+            "fuzz/corpus/$TARGET" "fuzz/seeds/$TARGET" \
+            -- "-max_total_time=$((MINUTES * 60))" \
+            -dict=fuzz/dictionaries/diff.dict -print_final_stats=1
+      - name: Save the corpus
+        # `always()`: see the restore step — a crash is the run worth keeping the corpus from.
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
       # A crash is the whole point of the run: keep the input that produced it, so it can be
       # replayed locally (`cargo fuzz run <target> <artifact>`) and turned into a regression
       # test in tests/.

@@ -1,0 +1,44 @@
+# libFuzzer dictionary: the tokens a unified diff is made of.
+#
+# Without it the fuzzer has to guess "diff --git " byte by byte before it reaches any of the
+# parsing code worth exercising. Passed as `-dict=` in .github/workflows/fuzz.yml; keep it in
+# step with what src/parser.rs actually recognises.
+
+# File headers
+header_diff_git="diff --git "
+header_old="--- "
+header_new="+++ "
+header_old_a="--- a/"
+header_new_b="+++ b/"
+header_dev_null="/dev/null"
+header_index="index "
+header_mode="new file mode 100644"
+header_deleted="deleted file mode 100644"
+header_rename_from="rename from "
+header_rename_to="rename to "
+header_similarity="similarity index "
+
+# Hunks
+hunk_open="@@ -"
+hunk_close=" @@"
+hunk_full="@@ -1,3 +1,3 @@"
+hunk_single="@@ -1 +1 @@"
+combined="@@@ -1,1 -1,1 +1,1 @@@"
+combined_diff="diff --cc "
+
+# Body markers
+add="+"
+del="-"
+context=" "
+no_newline="\\ No newline at end of file"
+
+# Binary patches
+binary_git="GIT binary patch"
+binary_literal="literal "
+binary_delta="delta "
+
+# Line endings and separators
+crlf="\x0d\x0a"
+mail_from="From: "
+mail_subject="Subject: [PATCH] "
+signature="-- "

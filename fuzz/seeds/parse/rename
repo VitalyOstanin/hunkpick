@@ -1,0 +1,9 @@
+diff --git a/old b/new
+similarity index 88%
+rename from old
+rename to new
+--- a/old
++++ b/new
+@@ -1 +1 @@
+-old
++new
