@@ -11,8 +11,11 @@ library (`src/lib.rs`) and a binary (`src/main.rs`).
   do not add `Co-Authored-By` trailers.
 - The core processes the diff as **raw bytes** end to end; only paths and previews shown
   by `list` are decoded lossily. Keep new code byte-oriented — do not assume UTF-8.
-- Minimum supported Rust version is **1.85** (pinned in `clippy.toml` and
-  `rust-toolchain.toml`); design decisions in `cargo +1.85 build` must keep passing.
+- Minimum supported Rust version is **1.85**, stated in `Cargo.toml` (`rust-version`) and
+  `clippy.toml` (`msrv`), and gated by the `msrv` job in CI. `rust-toolchain.toml` pins only the
+  channel and the components, not a version. On edition 2024 the resolver reads `rust-version`
+  itself, so a dependency needing a newer compiler is not selected in the first place.
+  `cargo +1.85 build` must keep passing.
 
 ## Development loop
 

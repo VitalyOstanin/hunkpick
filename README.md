@@ -162,8 +162,20 @@ src/new_file.rs
 
 Text a terminal would act on rather than show — escape sequences, control bytes,
 bidirectional overrides — is escaped in this listing (`\x1b`, `\u{202e}`), so a diff
-being filtered cannot repaint or reorder what you are reading. The JSON listing carries
-the text as-is (JSON escapes control characters itself).
+being filtered cannot repaint or reorder what you are reading.
+
+**The JSON listing does not do this.** Its text fields (`path`, `header`, `preview`,
+`changed_lines[].text`) reproduce the diff's own bytes: JSON escaping covers control
+characters, but a bidirectional override survives it and comes back out of any parser as the
+character it was. That is deliberate — the machine-readable mode reports what the diff says,
+not a display-safe rendering of it — so **a consumer that prints these fields to a terminal
+must escape them itself**. Prefer the human listing when a person is reading the output.
+
+Two of those fields are also lossy for a path or a line that is not valid UTF-8 (legal on
+Unix): JSON must be UTF-8, so undecodable bytes become `U+FFFD`. A path taken from `list
+--json` therefore does not necessarily round-trip back into a `path:N` selector. For such a
+file, address the sub-hunk by its content id (`@id`), which is computed over the raw bytes and
+is exact.
 
 **JSON schema** (`--json`): array of file objects, each with `path`, `binary`, and
 `hunks` (array of sub-hunk objects with `index`, `id`, `id_count`, `old_start`,
@@ -351,10 +363,20 @@ numbering, exactly as `list --json` reports them under `changed_lines`. The set 
 comma-separated list of indices and ranges, e.g. `L1,3` or `L1-2,4`.
 
 Each unselected deletion is kept as a context line and each unselected addition is omitted,
-and both leading and trailing context of the sub-hunk are retained. Any subset is therefore
-realisable as a single applicable hunk (no `--unidiff-zero` needed) — there is no boundary
-restriction, so a deletion surrounded by additions (`+x -y +z`) can be isolated, and a
-replacement's removals can be separated from its insertions.
+and both leading and trailing context of the sub-hunk are retained. A subset is therefore
+realisable as a single hunk with no boundary restriction: a deletion surrounded by additions
+(`+x -y +z`) can be isolated, and a replacement's removals can be separated from its
+insertions.
+
+Two cases are outside that:
+
+1. **An entry that deletes the file entirely** (`+++ /dev/null`, or a `deleted file mode`
+   header). Turning an unselected deletion into a context line would say the file still has
+   that line after the patch, which contradicts the entry. A partial `@L` on such an entry is
+   a usage error (exit 2); selecting all of its changed lines is fine.
+2. **A piece that ends up with no context at all** — a whole-file replacement, a file creation
+   or deletion. There is nothing to anchor it to, so `git apply` needs `--unidiff-zero` for
+   it.
 
 Example — split an addition-only block across two commits, one piece per round:
 
@@ -367,7 +389,8 @@ git diff src/lib.rs | hunkpick select 1@L91-120 | git apply --cached && git comm
 A sub-hunk addressed by `@L` must be addressed **once per invocation**: combining it with
 another `@L`, or with a whole selection of the same sub-hunk, is a usage error
 (exit 2) — the pieces would carry inconsistent line numbers. Stage further pieces in
-later `diff → stage → re-diff` rounds.
+later `diff → stage → re-diff` rounds. A partial `@L` on an entry that deletes the file is a
+usage error for the reason given above.
 
 Example — separate a replacement's removals from its insertions. `list --json` shows the
 changed lines and their indices:
@@ -410,8 +433,18 @@ git diff path | hunkpick select 1 --no-verify-result-diff-internal
 Pass `--verify-result-diff-git` to additionally run `git apply --check` on the result
 diff before emitting it. This confirms the diff applies cleanly to the working tree.
 
+**Read that literally: to the working tree.** `git apply --check` without `--index` compares
+against the files on disk, not against the index. In the staging pipeline this README is built
+around — `git diff | hunkpick select ... | git apply --cached` — the working tree already
+contains the edits the diff describes, so git reports `patch does not apply` and hunkpick exits
+70 for a result that is perfectly correct. The flag is for the case where the tree *is* at the
+state the diff expects: checking a patch file against a clean checkout, or pointing `-C` at
+such a tree. It is not a routine safety net for the staging loop — the internal check above is,
+and it runs by default.
+
 ```sh
-git diff path | hunkpick select 1 --verify-result-diff-git
+# The tree is at the pre-patch state: the check is meaningful here.
+hunkpick select 1 -i patch.diff --verify-result-diff-git -C /path/to/clean/checkout
 ```
 
 Use `-C <DIR>` to specify the working tree directory (default: current directory).
@@ -424,7 +457,8 @@ git diff path | hunkpick select 1 --verify-result-diff-git -C /path/to/repo
 ### Verification failure
 
 On any verification failure, `hunkpick` writes a diagnostic to stderr, writes
-nothing to stdout, and exits with code **70**.
+nothing to stdout, and exits with code **70**. A `git` that cannot be started at all is a
+different matter — the check never ran, so that is exit **74**, not a verdict on the diff.
 
 ## Input handling
 
@@ -447,6 +481,12 @@ Mercurial or Subversion produce. Within that, the input is passed through unchan
 comes in comes back out byte for byte, including CRLF endings, a `\ No newline at end of file`
 marker, the mail head and footer of a `format-patch` output, a full binary patch
 (`git diff --binary`), and a diff that arrived without a final newline.
+
+The diff has to arrive as a UTF-8 (or otherwise ASCII-compatible) byte stream. A UTF-8 BOM is
+harmless and comes back out unchanged, but a UTF-16 or UTF-32 one is refused with a message
+naming the encoding — `git diff > patch.diff` in Windows PowerShell 5.1 produces UTF-16LE, and
+`iconv -f UTF-16LE -t UTF-8` makes it readable. hunkpick does not re-encode input: the whole
+point of the byte-for-byte pass-through is that what comes out is what went in.
 
 One format is deliberately not read: the **combined diff** git writes for a merge commit
 (`git show <merge>`, `git diff --cc`, `@@@` headers). Its body has one marker column per
@@ -482,6 +522,11 @@ hunkpick list --max-input-bytes 0 -i huge.diff           # no limit
 Note: the working-set memory is several times the input size (the input buffer, the
 parsed model, and the emitted diff coexist), so a 64 MiB input corresponds to a few
 hundred MiB of peak RAM. Lower the limit if you run in a memory-constrained environment.
+
+One other limit exists and is not configurable: a single selector may name at most **1 048 576**
+(2^20) indices, so `1-99999999` is a usage error (exit code 2) rather than an allocation. That
+ceiling is far above the sub-hunk count of any real diff — there is no legitimate reason to
+raise it, hence no flag.
 
 ### Validation
 
@@ -522,8 +567,8 @@ original (one hunk becomes several), but the applied result is the same.
 |------|-----------------------------------------------------------------|
 |    0 | Success                                                         |
 |    2 | Usage error: bad flag, bad selector, parse error, binary/non-diff input, input over size limit |
-|   70 | Verification failure (internal consistency or `git apply --check`) |
-|   74 | I/O error (reading stdin or writing stdout)                    |
+|   70 | Verification failure (internal consistency, or `git apply --check` rejecting the result) |
+|   74 | I/O error: reading stdin, writing stdout, or being unable to run `git` for `--verify-result-diff-git` |
 |  130 | Interrupted by SIGINT (default signal disposition: 128 + 2)     |
 |  143 | Terminated by SIGTERM (default signal disposition: 128 + 15)    |
 
@@ -576,10 +621,11 @@ hermetic — several tests shell out to `git apply --check` and require `git` on
 
 `cargo t` includes generated tests: a differential suite that compares hunkpick with real git
 over generated diffs, and property tests over shapes git will not produce on demand. The fuzz
-targets in [`fuzz/`](https://github.com/VitalyOstanin/hunkpick/blob/master/fuzz) need nightly and are run separately (`cargo +nightly fuzz run
-parse -- -max_total_time=60`); CI runs a short pass of each on every push and a longer search
-weekly. See [`CONTRIBUTING.md`](https://github.com/VitalyOstanin/hunkpick/blob/master/CONTRIBUTING.md) for what each kind covers and how a failure
-is reproduced.
+targets in [`fuzz/`](https://github.com/VitalyOstanin/hunkpick/blob/master/fuzz) need nightly and are run separately (`RUSTUP_TOOLCHAIN=nightly
+cargo fuzz run --target x86_64-unknown-linux-gnu parse -- -max_total_time=60` — both the
+toolchain variable and the explicit triple matter); CI builds each target on every push and runs
+a longer search twice a week. See [`CONTRIBUTING.md`](https://github.com/VitalyOstanin/hunkpick/blob/master/CONTRIBUTING.md) for what each kind
+covers, why those two flags are needed, and how a failure is reproduced.
 
 ## License
 

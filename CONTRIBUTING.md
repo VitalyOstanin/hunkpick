@@ -3,6 +3,16 @@
 Thanks for your interest in improving `hunkpick`. This document describes how to build
 the project, run the checks, and submit changes.
 
+## Contents
+
+- [Development environment](#development-environment)
+- [Development loop](#development-loop)
+- [Generated tests](#generated-tests)
+- [Releases](#releases)
+- [Pull requests](#pull-requests)
+- [Commit messages](#commit-messages)
+- [Reporting issues](#reporting-issues)
+
 ## Development environment
 
 - A Rust toolchain meeting the project's minimum supported version (**1.85**). The

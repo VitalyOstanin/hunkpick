@@ -46,10 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A combined diff (`diff --cc`, `@@@` headers — what git writes for a merge) was read as a
   two-sided one: the hunk body was truncated at its first line and a `--- removed in both`
   line invented a file entry. It is now rejected as unsupported (exit 2) instead of losing
-  data silently.
+  data silently. See `docs/ADR/0012-two-sided-diffs-only.md`.
 - The listing gave a CRLF diff's `@@` header a separating space and a raw CR — inside a JSON
   string field — where `emit` already knew the CR is the line ending, not section text.
-- - A context line for an empty source line is a lone space, and transports that strip
+- A context line for an empty source line is a lone space, and transports that strip
   trailing whitespace deliver it as a zero-length line. Parsing treated that line as the
   end of the hunk, dropped the rest of the body into the file's headers and emitted a
   diff `git apply` rejects as garbage — with exit code 0. Such a line is now read as
@@ -58,6 +58,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git format-patch` appends, a stray `Binary files ...` marker — were emitted with the
   leading headers, which moved them above the first `@@`. They now keep their position,
   and the binary marker is no longer dropped silently.
+- `split` replaces one hunk with several but left those trailing lines at their old
+  positions, so a signature recorded after the last hunk was emitted between the pieces.
+  `git apply` rejected the result (`patch fragment without header`) while hunkpick exited 0.
+  Each line now follows the hunk it followed before the split.
+- Emitting those lines rescanned the whole list for every hunk, which is quadratic in their
+  number: a 7 MB diff carrying a separator after each of its 128 000 hunks took 15 s to
+  re-emit, against 0,2 s to list. One pass now walks the list alongside the hunks (0,18 s on
+  the same input).
 - A binary file, a pure rename and a mode-only change have no `---`/`+++` lines, so they
   had no path and could not be addressed in a multi-file diff. Their paths are now read
   from the `diff --git` line, and `*` takes a hunkless entry whole.
@@ -76,7 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a Debug dump of internal fields. It is now a usage error (exit 2) in prose, with the
   sub-hunk numbered from one as `list` numbers it.
 - A reader that closes the pipe first (`hunkpick list | head`) ended the run with exit 74
-  and a `Broken pipe` diagnostic; it is now a normal end of work (exit 0).
+  and a `Broken pipe` diagnostic; it is now a normal end of work (exit 0). Both this and the
+  exit-code change above are recorded in `docs/ADR/0013-exit-code-contract.md`.
 - In the `path:set` selector form a broken set was re-read together with the path, so
   `f:2-1` was reported as `not a number: f:2` instead of `reversed range`.
 - `split` now recomputes new-side anchors like `select` does, so both commands treat a
@@ -87,6 +96,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A file whose name is not valid UTF-8 (legal on Unix) could not be addressed: the
   argument was refused before hunkpick saw it. Selector paths are now taken as raw bytes,
   so such a file is reachable by name; only the set after the `:` must be ASCII.
+- A selection that did not include the input's last line inherited its "no final newline"
+  flag, so the result ended mid-line and `git apply` called it a corrupt patch. The flag now
+  travels only when the result does end on that line.
+- A hunk header carrying a token hunkpick cannot represent — `@@ -1,3,9 +1,3 @@`,
+  `@@ -1,3 +1,3 junk @@` — was parsed as if the extra part were absent and emitted without it,
+  at exit 0. Both are now parse errors (exit 2).
+- A diff saved in UTF-16 (what `git diff > patch.diff` writes in Windows PowerShell 5.1) was
+  reported as "binary input: NUL byte found", which points at the wrong thing. A UTF-16/UTF-32
+  byte-order mark is now named, with the re-encoding command to fix it.
+- A `git` that could not be started for `--verify-result-diff-git` was reported as a failed
+  verification of the result diff (exit 70). The check never ran, so it is an environment
+  failure: exit 74.
+- Output written after the last newline could be lost silently: stdout is line-buffered and the
+  runtime's implicit flush at exit discards its error. It is flushed explicitly, and a failure
+  is exit 74.
+- `list --json` did not end its output with a newline.
+- A combined diff whose entries carry no `---`/`+++` pair (a file resolved the same way in both
+  parents) was reported as "no diff markers found" rather than as the combined diff it is.
 
 ### Changed
 
@@ -108,6 +135,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The minimum supported Rust version is unchanged (1.85, the release that stabilised the
   edition), so nothing is required of consumers; the dependency resolver now honours that
   minimum when picking versions. See `docs/ADR/0011-rust-2024-edition.md`.
+- `path:` selectors resolve through an index built once per invocation instead of scanning the
+  file list per selector: 16 000 selectors over 16 000 files went from 1.5 s to 0.04 s.
+- `--verify-result-diff-git` documents what it actually checks — the working tree, which in the
+  usual staging pipeline already holds the edits, so the flag reports a correct result as not
+  applying. Same for the JSON listing, whose text fields are the diff's own content: not
+  display-sanitised the way the human listing is, and lossy for non-UTF-8 bytes.
+- The selector index limit (2^20 per selector) is named in the error message and in the README.
+- The release pipeline checks the tag against the manifest, both lockfiles and the CHANGELOG in
+  a job of its own, before anything is built; publication runs in the `crates-io` GitHub
+  Environment, where a required reviewer can gate the irreversible step; and a release can be
+  rehearsed by running the workflow with no tag named, which reads the version from `Cargo.toml`
+  and publishes nothing.
+- Behavioural decisions of this release are recorded as ADRs: `docs/ADR/0012-two-sided-diffs-only.md`
+  and `docs/ADR/0013-exit-code-contract.md`.
 
 ### Added
 
@@ -116,9 +157,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (a selection applies, staging one sub-hunk at a time converges on the target, the output is
   valid input for the next invocation), `tests/property.rs` uses `proptest` for the forms git
   will not produce on demand (CRLF, a missing final newline, a mail preamble), and `fuzz/`
-  holds libFuzzer targets for parsing, the `parse . emit` fixed point and selector handling.
-  CI runs a 60-second smoke pass of each fuzz target; a weekly workflow runs a longer search
-  and keeps its corpus.
+  holds libFuzzer targets for parsing, the `parse . emit` fixed point and selector handling,
+  with committed seeds (`fuzz/seeds/`) and a token dictionary. CI builds every fuzz target on
+  each push; a scheduled workflow searches twice a week and keeps its corpus across runs.
 
 ### Changed (library API)
 
