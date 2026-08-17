@@ -1,0 +1,40 @@
+[package]
+name = "hunkpick-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.85"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.hunkpick]
+path = ".."
+
+# Prevent this crate from being picked up as a member of the parent package's build.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "selectors"
+path = "fuzz_targets/selectors.rs"
+test = false
+doc = false
+bench = false

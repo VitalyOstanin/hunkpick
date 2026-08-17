@@ -20,6 +20,7 @@ exclude = [
     "scripts/",
     "docs/",
     "about.toml",
+    "fuzz/",
     "CONTRIBUTING.md",
     "CLAUDE.md",
     "RELEASING.md",

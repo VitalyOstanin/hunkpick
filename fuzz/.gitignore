@@ -1,0 +1,6 @@
+# Build output and fuzzer state: the corpus and the crash artifacts are machine-local.
+# A crash worth keeping becomes a regression test in tests/, not a binary blob here.
+target
+corpus
+artifacts
+coverage

@@ -5,3 +5,7 @@ docs/__check/
 docs/__explore/
 # Generated at release time by scripts/generate-notices.sh
 /THIRD-PARTY-NOTICES.md
+# Written by proptest when a property fails. A saved seed records that something broke, not
+# what broke: a real defect becomes a named test instead.
+proptest-regressions/
+*.proptest-regressions

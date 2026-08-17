@@ -120,6 +120,38 @@ jobs:
       - name: Build
         run: cargo build --locked
 
+  fuzz:
+    name: Fuzz (smoke)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Fuzzing is open-ended by nature: this run is a smoke test that the targets still build
+    # and survive a short burst, not a search. A real search is the scheduled run in
+    # .github/workflows/fuzz.yml, which starts from the corpus this one cannot keep.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # libFuzzer needs the sanitizer support only nightly ships (`-Z` flags).
+      - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            .
+            fuzz
+      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        with:
+          tool: cargo-fuzz
+      - name: Run each target briefly
+        run: |
+          for target in parse roundtrip selectors; do
+            cargo fuzz run "$target" -- -max_total_time=60 -print_final_stats=1
+          done
+      - name: Keep the crash for inspection
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
   # The security audit lives in its own workflow (.github/workflows/audit.yml)
   # so it can also run on a weekly schedule — a cron run catches advisories
   # published against unchanged dependencies, which a push-only audit misses.
