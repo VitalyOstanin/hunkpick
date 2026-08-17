@@ -31,6 +31,11 @@ jobs:
       fail-fast: false
       matrix:
         target: [parse, roundtrip, selectors]
+    env:
+      # rust-toolchain.toml pins the whole repository to stable, and that file wins over an
+      # installed toolchain: without this override rustup hands cargo-fuzz the stable rustc,
+      # which rejects the `-Z` sanitizer flags libFuzzer needs.
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # libFuzzer needs the sanitizer support only nightly ships (`-Z` flags).

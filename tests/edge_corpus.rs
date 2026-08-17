@@ -507,9 +507,12 @@ rename to new
 /// carries the raw bytes, so the selector has to as well. Rejecting the argument as
 /// "invalid UTF-8" would make such a file unreachable by name in a multi-file diff.
 ///
-/// Unix-only: Windows paths cannot hold arbitrary bytes.
+/// Linux-only. Windows paths cannot hold arbitrary bytes at all, and macOS rejects them at the
+/// filesystem: APFS and HFS+ require file names to be valid UTF-8, so the file this test needs
+/// cannot be created there. The byte-exact addressing itself is not platform-specific — it is
+/// also covered by the `selectors` fuzz target, which feeds arbitrary bytes as the selector.
 #[test]
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn path_with_invalid_utf8_is_addressable() {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;

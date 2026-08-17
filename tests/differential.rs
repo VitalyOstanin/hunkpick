@@ -17,11 +17,23 @@ use tempfile::TempDir;
 
 /// How many generated cases the whole-selection properties run over. Each case is a commit plus
 /// a handful of hunkpick invocations, so this stays in the low seconds.
+///
+/// Windows gets a smaller count. A case is dominated by process spawns — `git` and `hunkpick`
+/// through `assert_cmd` — and spawning there costs an order of magnitude more than on Unix, so
+/// the full count exceeds the per-test timeout in `.config/nextest.toml`. The reduced run still
+/// exercises what is specific to the platform (path handling, line endings, invoking git at
+/// all); raising the timeout instead would weaken the guard against a genuinely hung test.
+#[cfg(not(windows))]
 const CASES: u64 = 200;
+#[cfg(windows)]
+const CASES: u64 = 30;
 
 /// How many cases the staging loop runs over: each one re-diffs after every sub-hunk, so it
 /// costs a multiple of the others.
+#[cfg(not(windows))]
 const STAGING_CASES: u64 = 40;
+#[cfg(windows)]
+const STAGING_CASES: u64 = 8;
 
 /// SplitMix64. Deterministic and dependency-free: the same seed yields the same case on every
 /// machine, which is what makes a failure reproducible.
