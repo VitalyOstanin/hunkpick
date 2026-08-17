@@ -29,8 +29,8 @@ Jobs run in this order; everything reversible happens before the one step that i
 
 Consistency checks inside `publish`: the tag matches
 `v<MAJOR>.<MINOR>.<PATCH>[-pre+build]` ([`scripts/release-validate-tag.sh`](scripts/release-validate-tag.sh)),
-the version in `Cargo.toml` equals the tag, `Cargo.lock` records that same version for the
-`hunkpick` package, and `CHANGELOG.md` has a `## [X.Y.Z]` section
+the version in `Cargo.toml` equals the tag, both `Cargo.lock` and `fuzz/Cargo.lock` record that
+same version for the `hunkpick` package, and `CHANGELOG.md` has a `## [X.Y.Z]` section
 ([`scripts/check-changelog.sh`](scripts/check-changelog.sh)).
 
 ## Preparing the release commit
@@ -46,15 +46,19 @@ the version in `Cargo.toml` equals the tag, `Cargo.lock` records that same versi
    Update `.github/workflows/{ci,release}.yml` if either differs from what is pinned there.
 2. Make sure `master` is green and up to date with `origin`.
 3. Bump `version` in [`Cargo.toml`](Cargo.toml).
-4. Refresh the lock entry so `Cargo.lock` carries the new version:
+4. Refresh the lock entry in both workspaces so each carries the new version. The fuzz
+   workspace has its own lock, and leaving it behind makes every cargo command in `fuzz/`
+   rewrite it later:
 
    ```sh
    cargo update -p hunkpick
+   (cd fuzz && cargo update -p hunkpick)
    ```
 
 5. In [`CHANGELOG.md`](CHANGELOG.md), turn the `## [Unreleased]` section into
    `## [X.Y.Z] - YYYY-MM-DD` (ASCII hyphen, ISO date) and add a fresh empty `Unreleased`
-   section above it. Update the link definitions at the bottom of the file.
+   section above it. Add the new version to the table of contents at the top; the file has no
+   link definitions at the bottom — its entries link to the heading anchors.
 6. Verify locally:
 
    ```sh
@@ -69,10 +73,15 @@ the version in `Cargo.toml` equals the tag, `Cargo.lock` records that same versi
 
 ## Rehearsing with a dry run
 
-Before tagging, the whole pipeline can be exercised without publishing anything. Create the tag
-locally and push it, or run the workflow manually with `dry_run: true` — that path builds every
-target, generates the third-party notices and verifies each archive, but skips `cargo publish`,
-the Release creation and the asset upload.
+Before tagging, the whole pipeline can be exercised without publishing anything: run the Release
+workflow manually (`gh workflow run release.yml --ref master`) and leave the `tag` input **empty**.
+The version is then read from `Cargo.toml`, the run checks out the selected branch, and it builds
+every target, generates the third-party notices and verifies each archive — but skips
+`cargo publish`, the Release creation and the asset upload.
+
+Do not rehearse by pushing the tag: the trigger is `push: tags: ['v*']`, so the push *is* the
+release, and `cargo publish` is irreversible. The `dry_run: true` input applies to the other manual
+form — a run that names an existing tag — and is for re-checking a tag that is already public.
 
 To reproduce the packaging step on your own machine:
 
@@ -91,8 +100,16 @@ git tag -a vX.Y.Z -m "vX.Y.Z"
 git push origin vX.Y.Z
 ```
 
-The tag push starts the pipeline. When it finishes, check that the Release carries one archive
-plus one `.sha256` per target and that `cargo binstall hunkpick` picks up the new version.
+The tag push starts the pipeline. Its first job, `Verify tag, manifest, locks and CHANGELOG`,
+takes seconds and stops the run before anything is compiled if the tag, `Cargo.toml`, either
+lockfile or the CHANGELOG disagree. When the pipeline finishes, check that the Release carries one
+archive plus one `.sha256` per target and that `cargo binstall hunkpick` picks up the new version.
+
+The `publish` job runs in the `crates-io` GitHub Environment. Keep `CARGO_REGISTRY_TOKEN` as a
+secret of that environment rather than of the repository, and add a required reviewer to it
+(Settings → Environments → crates-io): the pipeline then pauses before the one irreversible step,
+so a tag pushed by mistake never reaches the registry. Without those settings the environment
+exists but enforces nothing.
 
 ## If something fails
 

@@ -1,15 +1,19 @@
 name: resolve-release-tag
 description: >-
   Single source of truth for "what are we releasing". Resolves the release tag
-  from either the pushed ref or the workflow_dispatch input, validates its
-  `vX.Y.Z[-pre+build]` format, and exposes both the tag (with `v` prefix, e.g.
-  `v0.1.0`) and the version (without prefix, e.g. `0.1.0`). The dispatch input
-  flows through `env:` rather than being interpolated into the shell body, so a
-  malicious tag value cannot smuggle commands at template-expansion time.
+  from the pushed ref, the workflow_dispatch input, or — when a manual run names
+  no tag — from Cargo.toml, so a rehearsal can run before the tag exists. It
+  validates the `vX.Y.Z[-pre+build]` format and exposes both the tag (with `v`
+  prefix, e.g. `v0.1.0`) and the version (without prefix, e.g. `0.1.0`). The
+  dispatch input flows through `env:` rather than being interpolated into the
+  shell body, so a malicious tag value cannot smuggle commands at
+  template-expansion time.
 
 inputs:
   tag:
-    description: 'The workflow_dispatch tag input (empty on a tag push).'
+    description: >-
+      The workflow_dispatch tag input. Empty on a tag push, and empty on a manual
+      rehearsal, where the version is read from Cargo.toml instead.
     required: false
     default: ''
 
@@ -20,6 +24,9 @@ outputs:
   version:
     description: 'Resolved version without the `v` prefix (e.g. 0.1.0).'
     value: ${{ steps.tag.outputs.version }}
+  rehearsal:
+    description: '`true` when the version came from Cargo.toml because no tag was named.'
+    value: ${{ steps.tag.outputs.rehearsal }}
 
 runs:
   using: composite
@@ -31,12 +38,22 @@ runs:
         EVENT_NAME: ${{ github.event_name }}
         TAG_INPUT: ${{ inputs.tag }}
       run: |
-        if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+        REHEARSAL=false
+        if [ "$EVENT_NAME" != "workflow_dispatch" ]; then
+          TAG="${GITHUB_REF#refs/tags/}"
+        elif [ -n "$TAG_INPUT" ]; then
           TAG="$TAG_INPUT"
         else
-          TAG="${GITHUB_REF#refs/tags/}"
+          # A manual run with no tag named is a rehearsal against the checked-out branch: the
+          # version comes from the manifest, so the whole pipeline can be exercised before the
+          # tag exists. Pushing the tag to create one would already have published the crate,
+          # which is the thing a rehearsal is meant to happen before. `--offline` keeps this to
+          # a read of the manifest and lockfile already in the tree.
+          TAG="v$(cargo pkgid --offline | sed -E 's/.*[#@]//')"
+          REHEARSAL=true
         fi
         bash scripts/release-validate-tag.sh "$TAG"
         VERSION="${TAG#v}"
         echo "tag=$TAG" >> "$GITHUB_OUTPUT"
         echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo "rehearsal=$REHEARSAL" >> "$GITHUB_OUTPUT"
