@@ -1,0 +1,7 @@
+# Aliases for the documented test runs. `cargo t` goes through nextest, whose profile in
+# .config/nextest.toml bounds per-test time and parallelism — `cargo test` has neither, and the
+# integration tests spawn `git` processes. Doctests are a separate alias because nextest does
+# not run them.
+[alias]
+t = "nextest run --all-features"
+t-doc = "test --all-features --doc"
