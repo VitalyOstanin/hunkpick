@@ -46,7 +46,9 @@ survived several reviews were found by generating inputs, not by reading code.
 | 3 | `fuzz/`                   | libFuzzer targets over arbitrary bytes: parsing must not panic, `parse . emit` must be a fixed point, a successful selection must pass its own checks | open-ended; run on demand     |
 
 Cases 1 and 2 are deterministic: a failure names the seed (differential) or shrinks to the
-smallest failing shape (property), so it reproduces. A shrunk case that turns out to be a real
+smallest failing shape (property), so it reproduces. The differential suite runs 200 generated
+cases by default (30 on Windows, where process spawns cost an order of magnitude more);
+`HUNKPICK_DIFF_CASES=2000 cargo t` soaks it harder without editing the source. A shrunk case that turns out to be a real
 defect is worth adding to the hand-written tests as well — `proptest-regressions` files are
 generated locally and not committed, because a saved seed says nothing about what broke.
 

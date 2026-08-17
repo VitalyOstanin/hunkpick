@@ -64,19 +64,7 @@ fn select_across_three_files_picks_named_only_and_applies() {
         .stdout(predicate::str::contains("src/b.rs").not());
 
     // And the multi-file result applies cleanly via git.
-    Command::cargo_bin("hunkpick")
-        .unwrap()
-        .args([
-            "select",
-            "src/a.rs:1",
-            "src/c.rs:1",
-            "--verify-result-diff-git",
-            "-C",
-            dir.path().to_str().unwrap(),
-        ])
-        .write_stdin(diff)
-        .assert()
-        .success();
+    common::select_checked(&dir, &diff, &["src/a.rs:1", "src/c.rs:1"]).success();
 }
 
 /// `path:*` addresses every sub-hunk of one file within a multi-file diff, leaving the

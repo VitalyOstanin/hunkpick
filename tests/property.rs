@@ -11,12 +11,15 @@ use hunkpick::model::{FileContent, Patch};
 use hunkpick::{emit, parser, renumber, select, validate};
 use proptest::prelude::*;
 
-/// One generated change: a replacement, an insertion or a deletion at a line of the base file.
+/// One generated change at a line of the base file. `TwoBlocks` is a single hunk holding two
+/// separate change runs with context between them — the shape auto-splitting exists for, and the
+/// one the other three never produce.
 #[derive(Clone, Debug)]
 enum Edit {
     Replace,
     Insert,
     Delete,
+    TwoBlocks,
 }
 
 /// The shape of a generated diff. Rendering happens in [`render`]; keeping the shape separate
@@ -35,10 +38,18 @@ struct DiffShape {
     preamble: bool,
     /// The diff itself ends without a final newline (pasted or piped that way).
     no_trailing_newline: bool,
+    /// Line numbers sit just below `u32::MAX` — a diff carved out of a huge generated file, and
+    /// the range where the overlap arithmetic used to wrap.
+    high_line_numbers: bool,
 }
 
 fn arb_shape() -> impl Strategy<Value = DiffShape> {
-    let edit = prop_oneof![Just(Edit::Replace), Just(Edit::Insert), Just(Edit::Delete),];
+    let edit = prop_oneof![
+        Just(Edit::Replace),
+        Just(Edit::Insert),
+        Just(Edit::Delete),
+        Just(Edit::TwoBlocks),
+    ];
     (
         2usize..24,
         prop::collection::vec((0usize..24, edit), 1..6),
@@ -46,15 +57,25 @@ fn arb_shape() -> impl Strategy<Value = DiffShape> {
         any::<bool>(),
         any::<bool>(),
         any::<bool>(),
+        any::<bool>(),
     )
         .prop_map(
-            |(lines, edits, crlf, no_eof_newline, preamble, no_trailing_newline)| DiffShape {
+            |(
                 lines,
                 edits,
                 crlf,
                 no_eof_newline,
                 preamble,
                 no_trailing_newline,
+                high_line_numbers,
+            )| DiffShape {
+                lines,
+                edits,
+                crlf,
+                no_eof_newline,
+                preamble,
+                no_trailing_newline,
+                high_line_numbers,
             },
         )
 }
@@ -81,17 +102,26 @@ fn render(shape: &DiffShape) -> Vec<u8> {
     out.extend_from_slice(b"+++ b/f");
     out.extend_from_slice(nl);
 
+    // A diff of a file whose lines are numbered near the top of the u32 range. The bodies are
+    // unaffected; only the header anchors move, which is where the overlap and anchor arithmetic
+    // used to wrap (a debug build panicked, a release build compared a meaningless value).
+    let base = if shape.high_line_numbers {
+        u32::MAX as usize - 10_000
+    } else {
+        0
+    };
+
     // Hunks are emitted in ascending, non-overlapping old-side order: the parser rejects an
     // input whose hunks overlap, and a rejected input would test nothing.
     let mut at = 1usize;
     let mut delta: i64 = 0;
-    for (i, (raw, edit)) in shape.edits.iter().enumerate() {
+    let mut hunks = 0usize;
+    for (raw, edit) in &shape.edits {
         if at + 2 > shape.lines {
             break;
         }
         let start = at + raw % (shape.lines - at + 1).max(1);
         let start = start.min(shape.lines.saturating_sub(1)).max(at);
-        let last_edit = i + 1 == shape.edits.len();
         let (old_lines, new_lines, body): (usize, usize, Vec<(u8, String)>) = match edit {
             Edit::Replace => (
                 2,
@@ -118,14 +148,29 @@ fn render(shape: &DiffShape) -> Vec<u8> {
                     (b'-', format!("line {}", start + 1)),
                 ],
             ),
+            // Two change runs separated by a context line: one hunk, two sub-hunks. This is what
+            // auto-splitting is for, and none of the shapes above reach it.
+            Edit::TwoBlocks => (
+                5,
+                5,
+                vec![
+                    (b' ', format!("line {start}")),
+                    (b'-', format!("line {}", start + 1)),
+                    (b'+', format!("changed {}", start + 1)),
+                    (b' ', format!("line {}", start + 2)),
+                    (b'-', format!("line {}", start + 3)),
+                    (b'+', format!("changed {}", start + 3)),
+                    (b' ', format!("line {}", start + 4)),
+                ],
+            ),
         };
         let new_start = (start as i64 + delta).max(1) as usize;
         delta += new_lines as i64 - old_lines as i64;
         out.extend_from_slice(
             format!(
                 "@@ -{} +{} @@",
-                range(start, old_lines),
-                range(new_start, new_lines)
+                range(start + base, old_lines),
+                range(new_start + base, new_lines)
             )
             .as_bytes(),
         );
@@ -134,14 +179,19 @@ fn render(shape: &DiffShape) -> Vec<u8> {
             out.push(*marker);
             out.extend_from_slice(text.as_bytes());
             out.extend_from_slice(nl);
-            // The marker only ever qualifies the very last line of the whole diff: anywhere
-            // else it would describe a file that ends in the middle of a hunk.
-            if shape.no_eof_newline && last_edit && std::ptr::eq(marker, &body.last().unwrap().0) {
-                out.extend_from_slice(b"\\ No newline at end of file");
-                out.extend_from_slice(nl);
-            }
         }
         at = start + old_lines + 1;
+        hunks += 1;
+    }
+
+    // The marker only ever qualifies the very last line of the whole diff — anywhere else it
+    // would describe a file that ends in the middle of a hunk — so it is appended once the
+    // hunks are rendered. Deciding it inside the loop against `shape.edits.len()` dropped it
+    // silently whenever the loop stopped early on the `at + 2 > shape.lines` guard, and the
+    // shape's `no_eof_newline` then went untested rather than tested.
+    if shape.no_eof_newline && hunks > 0 {
+        out.extend_from_slice(b"\\ No newline at end of file");
+        out.extend_from_slice(nl);
     }
 
     if shape.no_trailing_newline {

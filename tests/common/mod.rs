@@ -24,17 +24,30 @@ pub fn git(dir: &TempDir) -> Sys {
         "GIT_CONFIG_SYSTEM",
         dir.path().join("absent-system-gitconfig"),
     );
-    for var in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_COMMON_DIR",
-        "GIT_CEILING_DIRECTORIES",
-    ] {
-        cmd.env_remove(var);
-    }
+    // The list itself comes from the crate, so the tests insulate exactly what the tool does.
+    hunkpick::gitenv::insulate_repo_location(&mut cmd);
     cmd
+}
+
+/// Run `git` in `dir` with `args`, feeding `stdin_bytes` on stdin, and return the child's
+/// status. Feeding from a separate thread mirrors `validate::validate_with_git`: writing the
+/// whole diff before waiting deadlocks once git fills its stderr pipe, and a diff big enough
+/// for that is exactly what these tests generate.
+pub fn git_with_stdin(dir: &TempDir, args: &[&str], stdin_bytes: &[u8]) -> std::process::Output {
+    let mut child = git(dir)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().expect("stdin was configured as piped");
+    std::thread::scope(|scope| {
+        // A closed pipe means git stopped reading early; its status and stderr carry the
+        // diagnosis, so the write error is not what the caller should see.
+        scope.spawn(move || stdin.write_all(stdin_bytes));
+        child.wait_with_output().unwrap()
+    })
 }
 
 /// Initialise a git repo in a temp directory with the given files committed.
@@ -102,13 +115,18 @@ pub fn revert(dir: &TempDir) {
 
 /// Stage `diff` into the index of the repo in `dir` (`git apply --cached`).
 pub fn apply_cached(dir: &TempDir, diff: &[u8]) {
-    let mut child = git(dir)
-        .args(["apply", "--cached"])
-        .stdin(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child.stdin.take().unwrap().write_all(diff).unwrap();
-    assert!(child.wait().unwrap().success(), "git apply --cached failed");
+    apply_diff(dir, &["apply", "--cached"], diff, "git apply --cached");
+}
+
+/// Apply `diff` with `args` in `dir`, asserting success and reporting git's own diagnosis —
+/// the stderr is what tells a rejected patch apart from an unusable repository.
+pub fn apply_diff(dir: &TempDir, args: &[&str], diff: &[u8], what: &str) {
+    let out = git_with_stdin(dir, args, diff);
+    assert!(
+        out.status.success(),
+        "{what} failed: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
 }
 
 /// Run hunkpick with `args` and `stdin`, assert success, return stdout bytes.
@@ -127,4 +145,31 @@ pub fn run_ok(args: &[&str], stdin: &str) -> Vec<u8> {
 /// Like [`run_ok`], for the common case of a textual result.
 pub fn run_ok_text(args: &[&str], stdin: &str) -> String {
     String::from_utf8(run_ok(args, stdin)).unwrap()
+}
+
+/// Run `hunkpick select` over `diff` with the git check enabled against `dir`'s working tree,
+/// and return the assertion so a caller can add expectations of its own.
+///
+/// The five-argument invocation is what most of these tests are made of; spelled out per test it
+/// buries which selector is being exercised under identical scaffolding.
+pub fn select_checked(dir: &TempDir, diff: &str, selectors: &[&str]) -> assert_cmd::assert::Assert {
+    let mut cmd = Cli::cargo_bin("hunkpick").unwrap();
+    cmd.arg("select");
+    cmd.args(selectors);
+    cmd.args([
+        "--verify-result-diff-git",
+        "-C",
+        dir.path().to_str().unwrap(),
+    ]);
+    cmd.write_stdin(diff.to_string()).assert()
+}
+
+/// [`select_checked`] for the usual case: the selection must succeed. Returns its stdout.
+pub fn select_checked_ok(dir: &TempDir, diff: &str, selectors: &[&str]) -> String {
+    let out = select_checked(dir, diff, selectors)
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8(out).unwrap()
 }
