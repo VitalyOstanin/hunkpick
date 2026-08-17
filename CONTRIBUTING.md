@@ -34,6 +34,34 @@ limits (per-test timeout and thread count) live in
 it still has no per-test timeout, so a hung test has to be interrupted by hand. Keep tests fast
 and hermetic.
 
+## Generated tests
+
+Three kinds of test run beside the hand-written ones. They exist because the defects that
+survived several reviews were found by generating inputs, not by reading code.
+
+| № | Where                     | What it does                                                                                          | Cost                          |
+|---|---------------------------|-------------------------------------------------------------------------------------------------------|-------------------------------|
+| 1 | `tests/differential.rs`   | Generates diffs with real git and asserts hunkpick agrees with it: a selection applies, staging one sub-hunk at a time converges, the output is valid input | seconds; part of `cargo t`    |
+| 2 | `tests/property.rs`       | Generates diffs directly, including forms git will not produce on demand (CRLF, missing final newline, a mail preamble), and checks round-trip, idempotence and the internal invariants | fast; part of `cargo t`        |
+| 3 | `fuzz/`                   | libFuzzer targets over arbitrary bytes: parsing must not panic, `parse . emit` must be a fixed point, a successful selection must pass its own checks | open-ended; run on demand     |
+
+Cases 1 and 2 are deterministic: a failure names the seed (differential) or shrinks to the
+smallest failing shape (property), so it reproduces. A shrunk case that turns out to be a real
+defect is worth adding to the hand-written tests as well — `proptest-regressions` files are
+generated locally and not committed, because a saved seed says nothing about what broke.
+
+The fuzz targets need nightly (libFuzzer uses `-Z` flags) and a C++ toolchain, so they are not
+part of the normal loop:
+
+```sh
+cargo +nightly fuzz run parse -- -max_total_time=60      # one target, one minute
+cargo +nightly fuzz run parse fuzz/artifacts/parse/<id>  # replay a crash
+```
+
+CI runs a 60-second smoke pass of each target on every push, and
+[`.github/workflows/fuzz.yml`](.github/workflows/fuzz.yml) runs a longer weekly search that
+keeps its corpus between runs.
+
 ## Releases
 
 Cutting a release is described in [`RELEASING.md`](RELEASING.md): what the pipeline checks,

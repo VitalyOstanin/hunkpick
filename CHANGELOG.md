@@ -24,7 +24,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- A context line for an empty source line is a lone space, and transports that strip
+- The overlap check compared raw header numbers, ignoring git's convention that a side with
+  no lines reports the line *before* its empty range. A hunk ending in a pure deletion —
+  a file whose tail is removed — therefore looked like an overlap, and `select '*'` refused
+  a diff git itself writes: exit code 70 on roughly one in ten ordinary diffs (measured over
+  200 generated cases). Present since 0.7.0, when the new-side check was introduced.
+- A full binary patch (`git diff --binary`) lost its structure: the payload lines
+  (`literal <n>` and the base85 body) were filed as leading headers and emitted *above* the
+  `GIT binary patch` marker, so `git apply` rejected the result as garbage while hunkpick
+  exited 0. This is the form needed to stage a binary change, and the binary marker of a
+  CRLF diff went unrecognised for the same reason.
+- A sub-hunk with no old-side lines (an appended block) carried a header one line past
+  where git puts it (`@@ -4,0 +5 @@` instead of `@@ -3,0 +4 @@`), and the new-side anchor
+  inherited the shift.
+- An `@L` slice of a whole-file deletion produced a self-contradictory patch: the header
+  declares the file removed while the body keeps the unselected lines as context, which git
+  rejects (`deleted file f still has contents`). Such a selection is now a usage error.
+- A combined diff (`diff --cc`, `@@@` headers — what git writes for a merge) was read as a
+  two-sided one: the hunk body was truncated at its first line and a `--- removed in both`
+  line invented a file entry. It is now rejected as unsupported (exit 2) instead of losing
+  data silently.
+- The listing gave a CRLF diff's `@@` header a separating space and a raw CR — inside a JSON
+  string field — where `emit` already knew the CR is the line ending, not section text.
+- - A context line for an empty source line is a lone space, and transports that strip
   trailing whitespace deliver it as a zero-length line. Parsing treated that line as the
   end of the hunk, dropped the rest of the body into the file's headers and emitted a
   diff `git apply` rejects as garbage — with exit code 0. Such a line is now read as
@@ -84,6 +106,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   edition), so nothing is required of consumers; the dependency resolver now honours that
   minimum when picking versions. See `docs/ADR/0011-rust-2024-edition.md`.
 
+### Added
+
+- Generated tests, because the defects above were found by generating inputs rather than by
+  reading code: `tests/differential.rs` compares hunkpick with real git over generated diffs
+  (a selection applies, staging one sub-hunk at a time converges on the target, the output is
+  valid input for the next invocation), `tests/property.rs` uses `proptest` for the forms git
+  will not produce on demand (CRLF, a missing final newline, a mail preamble), and `fuzz/`
+  holds libFuzzer targets for parsing, the `parse . emit` fixed point and selector handling.
+  CI runs a 60-second smoke pass of each fuzz target; a weekly workflow runs a longer search
+  and keeps its corpus.
+
 ### Changed (library API)
 
 - `Selector::File.path` is `Option<Vec<u8>>` instead of `Option<String>`, and
@@ -94,6 +127,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   index, so the redundant index in each tuple is gone.
 - The crate denies undocumented public items (`#![warn(missing_docs)]`); every exported
   item now carries rustdoc.
+- `Line::no_newline` is `Option<Vec<u8>>` (the marker as it arrived) rather than a flag, so a
+  CRLF diff keeps the marker's line ending.
+- `Patch` gained `preamble` (the lines before the first file entry — the mail head of a
+  `format-patch` output, which used to be dropped while its footer was kept) and
+  `no_trailing_newline` (an input that ended without one now leaves without one). Together
+  with the two above, `emit` now round-trips its input byte for byte, not just a
+  git-canonical diff.
+- `ParseError` gained a `Combined` variant for merge diffs.
 
 ## [0.7.0] - 2026-07-29
 

@@ -440,6 +440,20 @@ hunkpick select 1,3 -i changes.diff | git apply --cached
 git diff | hunkpick select 1,3            # stdin (default)
 ```
 
+### What the input may be
+
+hunkpick reads a two-sided unified diff: what `git diff`, `git format-patch`, `diff -u`, and
+Mercurial or Subversion produce. Within that, the input is passed through unchanged — what
+comes in comes back out byte for byte, including CRLF endings, a `\ No newline at end of file`
+marker, the mail head and footer of a `format-patch` output, a full binary patch
+(`git diff --binary`), and a diff that arrived without a final newline.
+
+One format is deliberately not read: the **combined diff** git writes for a merge commit
+(`git show <merge>`, `git diff --cc`, `@@@` headers). Its body has one marker column per
+parent, so a sub-hunk of it is not a two-sided change and cannot be addressed or sliced.
+hunkpick rejects such input as a usage error (exit code 2) rather than reading it as
+something it is not.
+
 ### Size limit
 
 Input (from stdin or a file) is capped at **64 MiB** by default to guard against an
@@ -559,6 +573,13 @@ doc tests. Test runner limits (per-test timeout and thread count) live in
 [`.config/nextest.toml`](https://github.com/VitalyOstanin/hunkpick/blob/master/.config/nextest.toml) and apply only under nextest; without it
 installed, use `cargo test --all-features -- --test-threads=4`. Please keep tests fast and
 hermetic — several tests shell out to `git apply --check` and require `git` on `PATH`.
+
+`cargo t` includes generated tests: a differential suite that compares hunkpick with real git
+over generated diffs, and property tests over shapes git will not produce on demand. The fuzz
+targets in [`fuzz/`](https://github.com/VitalyOstanin/hunkpick/blob/master/fuzz) need nightly and are run separately (`cargo +nightly fuzz run
+parse -- -max_total_time=60`); CI runs a short pass of each on every push and a longer search
+weekly. See [`CONTRIBUTING.md`](https://github.com/VitalyOstanin/hunkpick/blob/master/CONTRIBUTING.md) for what each kind covers and how a failure
+is reproduced.
 
 ## License
 
