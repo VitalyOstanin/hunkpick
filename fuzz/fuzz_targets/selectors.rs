@@ -24,6 +24,13 @@ fuzz_target!(|data: &[u8]| {
     let Ok(patch) = hunkpick::parser::parse(diff) else {
         return;
     };
+    // The CLI rejects an inconsistent input diff as a usage error before it selects anything
+    // (`load_and_parse` in main.rs): counts that disagree with the body are a defect of the
+    // input, not of hunkpick. Selection carries that disagreement into its result, so the
+    // output checks below only hold for input the CLI would have accepted.
+    if hunkpick::validate::validate_input(&patch).is_err() {
+        return;
+    }
     let args: Vec<OsString> = rest
         .split(|&b| b == b'\n')
         .take(MAX_SELECTORS)
