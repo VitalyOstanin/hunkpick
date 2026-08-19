@@ -69,6 +69,10 @@ jobs:
             echo "::error::minutes must be at least 1, got '$MINUTES'"
             exit 1
           fi
+          # The corpus directory does not exist on the first run: it is gitignored, so the
+          # checkout does not bring it, and the restore step has no cache to restore it from.
+          # libFuzzer requires the writable corpus directory to exist and does not create it.
+          mkdir -p "fuzz/corpus/$TARGET"
           # Two corpus directories: new inputs are written to the first, and fuzz/seeds/ is
           # read-only starting material committed to the repository — a diff of each shape the
           # parser handles, so a cold run does not spend its budget guessing "diff --git".
