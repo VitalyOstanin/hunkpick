@@ -241,8 +241,15 @@ jobs:
         run: cargo package --list
 
       - name: cargo publish --dry-run
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        # No token here, deliberately: a dry run never asks the registry for credentials
+        # (verified with a CARGO_HOME holding no credentials.toml and the variable unset).
+        # It does run a verification build, which compiles the package and the build scripts
+        # and proc macros of its dependencies — all of them inheriting this step's environment.
+        # A rehearsal (`workflow_dispatch` with an empty tag) builds whatever branch was chosen
+        # in the dialog, so a token here would be a crates.io credential, good for every crate
+        # of the account and outliving any repository access, handed to code from an arbitrary
+        # branch. The `cargo publish` step below keeps its own copy.
+        #
         # --locked forbids Cargo from regenerating Cargo.lock; the published
         # version is whatever was committed at the tagged commit. Pairs with
         # the lock-version check in verify-metadata so a stale lock cannot reach crates.io.

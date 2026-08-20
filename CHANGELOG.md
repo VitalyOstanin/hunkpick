@@ -119,6 +119,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was consolidated there last cycle, and `tests/git_config_isolation.rs` now poisons
   `GIT_CONFIG_SYSTEM` as well as `GIT_CONFIG_GLOBAL`, so dropping either one turns the suite red.
 
+- The crates.io token no longer reaches `cargo publish --dry-run` in the release workflow. A dry
+  run never asks the registry for credentials, but it does run a verification build, which
+  compiles the package along with the build scripts and proc macros of its dependencies — all of
+  them inheriting the step's environment. A rehearsal (`workflow_dispatch` with an empty tag)
+  builds whatever branch the dialog names, so the step handed a credential good for every crate
+  of the account, and outliving any access to this repository, to code from an arbitrary branch.
+  The publishing step keeps its own copy of the token.
+
 ### Changed
 
 - A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being
