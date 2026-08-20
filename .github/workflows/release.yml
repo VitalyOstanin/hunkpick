@@ -15,7 +15,9 @@ on:
         type: string
         default: ''
       dry_run:
-        description: 'With a tag named: build and check everything but skip cargo publish and the GitHub Release/asset steps.'
+        description: >-
+          With a tag named: build and check everything but skip cargo publish
+          and the GitHub Release/asset steps.
         required: false
         type: boolean
         default: false
@@ -30,12 +32,16 @@ env:
   # What every checkout in this workflow points at: the dispatched tag when one is named,
   # the pushed ref (or the branch a rehearsal was started from) otherwise. Declared once so
   # the six checkouts cannot drift apart.
-  RELEASE_REF: ${{ (github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag) || github.ref }}
+  RELEASE_REF: >-
+    ${{ (github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag)
+    || github.ref }}
 
 concurrency:
   # Spelled out rather than using RELEASE_REF: the `env` context is not available in
   # `concurrency`, which is evaluated before any job starts.
-  group: release-${{ (github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag) || github.ref }}
+  group: >-
+    release-${{ (github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag)
+    || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -89,9 +95,13 @@ jobs:
           # cargo command in `fuzz/` rewrite it and leave the working tree dirty. Fail loudly
           # here instead.
           for lock in Cargo.lock fuzz/Cargo.lock; do
-            LOCK_VERSION=$(awk '/^name = "hunkpick"$/{getline; sub(/^version = "/, ""); sub(/"$/, ""); print; exit}' "$lock")
+            LOCK_VERSION=$(awk '/^name = "hunkpick"$/ {
+              getline; sub(/^version = "/, ""); sub(/"$/, ""); print; exit
+            }' "$lock")
             if [ "$LOCK_VERSION" != "$TAG_VERSION" ]; then
-              echo "::error::$lock version $LOCK_VERSION does not match tag v$TAG_VERSION. Run \`cargo update -p hunkpick\` in that workspace and commit the lockfile."
+              echo "::error::$lock version $LOCK_VERSION does not match tag" \
+                "v$TAG_VERSION. Run \`cargo update -p hunkpick\` in that workspace" \
+                "and commit the lockfile."
               exit 1
             fi
           done
@@ -297,7 +307,8 @@ jobs:
             flag { print }
           ' CHANGELOG.md | sed -e '1{/^$/d}' -e '$,${/^$/d}' > release-notes.md
           if [ ! -s release-notes.md ]; then
-            echo "::warning::No CHANGELOG.md entry found for $VER; falling back to a placeholder note."
+            echo "::warning::No CHANGELOG.md entry found for $VER;" \
+              "falling back to a placeholder note."
             echo "_See git history._" > release-notes.md
           fi
 

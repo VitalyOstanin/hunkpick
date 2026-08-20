@@ -19,7 +19,8 @@ Examples:
 
   # Multi-file diff (git diff over several files): address sub-hunks per path.
   # A bare index needs a single-file diff; with many files every selector needs path:.
-  git diff src/a.rs src/b.rs src/c.rs | hunkpick select src/a.rs:1,3 src/c.rs:2-4 | git apply --cached
+  git diff src/a.rs src/b.rs src/c.rs \
+    | hunkpick select src/a.rs:1,3 src/c.rs:2-4 | git apply --cached
 
   # Every sub-hunk of a file (or of a single-file diff)
   git diff | hunkpick select src/main.rs:* | git apply --cached
@@ -64,8 +65,10 @@ Content ids (@<id>):
   # even as staging renumbers the bare indices, so the listing is never re-read.
   # `*` takes whatever sub-hunks are left at the end.
   git diff src/x.js | hunkpick list --json    # capture ids once (id_count flags shared ids)
-  git diff src/x.js | hunkpick select @bf7bdaaf30c1e2d4 | git apply --cached && git commit -m 'fix: ...'
-  git diff src/x.js | hunkpick select @058b36528575a870 @399e1cd421e268cc | git apply --cached && git commit -m 'feat: ...'
+  git diff src/x.js | hunkpick select @bf7bdaaf30c1e2d4 \
+    | git apply --cached && git commit -m 'fix: ...'
+  git diff src/x.js | hunkpick select @058b36528575a870 @399e1cd421e268cc \
+    | git apply --cached && git commit -m 'feat: ...'
   git diff src/x.js | hunkpick select '*' | git apply --cached && git commit -m 'chore: ...'
 
 Each subcommand has its own detailed --help (full selector grammar, content-id

@@ -211,7 +211,8 @@ Binary files a/img.png and b/img.png differ
     fn roundtrips_crlf_diff_byte_for_byte() {
         // The CR belongs to the line ending of the hunk header, not to its section text.
         roundtrip(
-            "diff --git a/f b/f\r\n--- a/f\r\n+++ b/f\r\n@@ -1,3 +1,3 @@\r\n a\r\n-b\r\n+B\r\n c\r\n",
+            "diff --git a/f b/f\r\n--- a/f\r\n+++ b/f\r\n\
+             @@ -1,3 +1,3 @@\r\n a\r\n-b\r\n+B\r\n c\r\n",
         );
         // A header that does carry section text keeps the separating space.
         roundtrip("--- a/f\r\n+++ b/f\r\n@@ -1,2 +1,2 @@ fn one()\r\n x\r\n-y\r\n+Y\r\n");

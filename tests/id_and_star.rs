@@ -82,7 +82,8 @@ fn id_is_stable_across_neighbour_staging() {
 
     assert!(
         ids_after.contains(&id_second),
-        "the surviving change keeps its id across neighbour staging: {id_second} not in {ids_after:?}"
+        "the surviving change keeps its id across neighbour staging: \
+         {id_second} not in {ids_after:?}"
     );
     common::sys(&dir, &["reset", "-q"]);
     common::revert(&dir);

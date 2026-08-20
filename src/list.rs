@@ -422,8 +422,8 @@ new file mode 100644
 
     #[test]
     fn json_lists_changed_lines_with_indices() {
-        // The first sub-hunk of TWO_CHANGES is the b->B change: one deletion, one addition, numbered
-        // 1 and 2 in body order (deletion first).
+        // The first sub-hunk of TWO_CHANGES is the b->B change: one deletion, one addition,
+        // numbered 1 and 2 in body order (deletion first).
         let p = parse(TWO_CHANGES.as_bytes()).unwrap();
         let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
         let cl = &v[0]["hunks"][0]["changed_lines"];

@@ -430,7 +430,8 @@ proptest! {
         };
 
         let mut out = patch.clone();
-        split::split_patch_hunk(&mut out, 0, hi, &[cut]).expect("a cut at an interior context line");
+        split::split_patch_hunk(&mut out, 0, hi, &[cut])
+            .expect("a cut at an interior context line");
         let text = emit::emit(&out);
         prop_assume!(!text.is_empty());
         if !text.ends_with(b"\n") {

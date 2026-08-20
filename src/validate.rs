@@ -297,7 +297,8 @@ impl fmt::Display for GitCheckError {
                 if stderr.is_empty() {
                     write!(
                         f,
-                        "git apply --check {how} without a diagnostic; the result diff was not checked"
+                        "git apply --check {how} without a diagnostic; \
+                         the result diff was not checked"
                     )
                 } else {
                     write!(

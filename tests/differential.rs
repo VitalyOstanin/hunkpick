@@ -36,7 +36,8 @@ use tempfile::TempDir;
 /// cases the slowest test above takes 44.5 s on the machine where it takes 4.5 s here, and the
 /// profile would kill it at 60 s — a soak that ends in a kill looks like a hang rather than a
 /// finished soak. The pair to use is
-/// `HUNKPICK_DIFF_CASES=2000 cargo nextest run --all-features --slow-timeout period=300s,terminate-after=2`.
+/// `HUNKPICK_DIFF_CASES=2000 cargo nextest run --all-features`
+/// with `--slow-timeout period=300s,terminate-after=2`.
 #[cfg(not(windows))]
 const DEFAULT_CASES: u64 = 200;
 #[cfg(windows)]
@@ -509,6 +510,7 @@ fn line_slices_and_splits_apply_via_git() {
     }
     assert!(
         sliced > 0 && split > 0,
-        "the generator stopped producing sliceable/splittable diffs: {sliced} slices, {split} splits"
+        "the generator stopped producing sliceable/splittable diffs: \
+         {sliced} slices, {split} splits"
     );
 }

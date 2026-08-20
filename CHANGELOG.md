@@ -170,6 +170,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it is now capped at 80. A manual dispatch also no longer cancels a scheduled search in
   progress: the corpus survives either way, but the search itself restarted from nothing.
 
+- The line-length rule in `.editorconfig` describes the repository again. It claimed 100 columns
+  for every file while 73 lines were longer, including one added in the same cycle: rustfmt
+  enforces the width for code but leaves comments and string literals alone, and nobody was
+  checking those. The Rust and workflow lines are wrapped, and a test keeps them that way.
+  Markdown is exempted with the reason stated — a table row is one line by definition and the
+  widest here is 252 columns, and the README links by full URL because it is also the crates.io
+  page — as is the one-line `description` in `Cargo.toml`.
+
 ### Changed
 
 - A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being

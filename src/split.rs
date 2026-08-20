@@ -49,7 +49,8 @@ impl fmt::Display for SplitError {
             SplitError::OutOfRange(n) => write!(f, "new-file line {n} is out of range"),
             SplitError::ChangedLineOutOfRange { index, changed } => write!(
                 f,
-                "changed-line index {index} is out of range (sub-hunk has {changed} changed line(s))"
+                "changed-line index {index} is out of range \
+                 (sub-hunk has {changed} changed line(s))"
             ),
             SplitError::NoChangedLinesSelected => {
                 write!(f, "the selection references no changed lines")

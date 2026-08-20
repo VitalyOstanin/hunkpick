@@ -10,7 +10,9 @@ trim_trailing_whitespace = true
 indent_style = space
 indent_size = 4
 # The same width rustfmt.toml sets as `max_width`, so an editor does not wrap a line where
-# `cargo fmt` would not.
+# `cargo fmt` would not. It holds for every file this covers, and a test in
+# tests/repo_conventions.rs keeps it that way — rustfmt does not reflow comments or string
+# literals, so without a check the limit drifts from the code by exactly those.
 max_line_length = 100
 
 # TOML stays out of this group: the manifests of this repository (`Cargo.toml`, `about.toml`)
@@ -26,6 +28,17 @@ indent_size = 4
 [*.md]
 # Two trailing spaces are a hard line break in Markdown.
 trim_trailing_whitespace = false
+# No limit here, and not for lack of trying: a table row is one line by definition, and the
+# widest in this repository is 252 columns; the README links every file it names by full URL,
+# because it is also the crates.io front page, where a relative link resolves nowhere. A limit
+# that a third of the long lines cannot meet is not a limit. Prose is still wrapped near 100 by
+# hand — that is a habit, not a rule an editor can enforce.
+max_line_length = off
+
+# `description` in Cargo.toml is one string that crates.io renders as one line; splitting it
+# would change what is published. The rest of the file is well within the limit.
+[Cargo.toml]
+max_line_length = off
 
 [Makefile]
 indent_style = tab

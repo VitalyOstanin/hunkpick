@@ -133,7 +133,8 @@ fn read_source(opts: &InputOpts) -> Result<Vec<u8>, AppError> {
             // silently is indistinguishable from a hang. One line to stderr says which it is.
             if stdin.is_terminal() {
                 eprintln!(
-                    "hunkpick: reading a diff from the terminal; pipe one in or use -i FILE (Ctrl-D ends the input)"
+                    "hunkpick: reading a diff from the terminal; pipe one in or use -i FILE \
+                     (Ctrl-D ends the input)"
                 );
             }
             read_limited(stdin.lock(), opts.max_input_bytes)
