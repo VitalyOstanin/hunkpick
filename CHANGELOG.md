@@ -127,6 +127,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the account, and outliving any access to this repository, to code from an arbitrary branch.
   The publishing step keeps its own copy of the token.
 
+- The release pipeline checks the public API too. `cargo semver-checks check-release` was a CI
+  gate only, and CI runs on branch pushes: a tag on a commit CI never saw, or one whose version
+  was bumped after the last run, reached the irreversible `cargo publish` with the API unchecked.
+  The release workflow now runs the same gate for the same reason its test, lint and MSRV jobs
+  are duplicated there.
+- The documented local loop covers what CI gates. The `fuzz` directory is a workspace of its own,
+  so the `--all` in `cargo fmt`/`cargo clippy` never reached it, while CI lints it as a separate
+  step: a fuzz target edited locally passed every documented command and failed the pull request.
+  The two commands are in CONTRIBUTING.md now, along with `cargo-semver-checks` as a tool the
+  project expects; RELEASING.md runs the semver and MSRV checks before the release commit, and
+  the README says its list is the everyday loop and points at CONTRIBUTING.md for the full set
+  rather than claiming to be it.
+
 ### Changed
 
 - A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being

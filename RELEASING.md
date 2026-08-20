@@ -65,9 +65,17 @@ same version for the `hunkpick` package, and `CHANGELOG.md` has a `## [X.Y.Z]` s
    cargo t && cargo t-doc                                      # tests
    cargo clippy --all-targets --all-features -- -D warnings    # lint
    cargo fmt --all --check                                     # formatting
+   cargo +1.85 check --all-targets --all-features              # MSRV
+   cargo semver-checks check-release                           # public API vs the released version
    bash scripts/check-changelog.sh X.Y.Z                       # changelog section exists
    cargo publish --dry-run --locked                            # package contents
    ```
+
+   The semver check is run here, after step 3 raised the version: it compares this tree against
+   the last version on crates.io and passes only if the number covers what the API did. Running
+   it before the bump reports the change against the version it is replacing. The full local
+   loop, including the two commands that lint the `fuzz` workspace, is in
+   [CONTRIBUTING.md](CONTRIBUTING.md).
 
 7. Commit as `chore(release): X.Y.Z` and push to `master`.
 

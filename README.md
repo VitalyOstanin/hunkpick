@@ -624,10 +624,18 @@ cargo fmt --all --check
 # Verify the code still compiles on the minimum supported Rust version (1.85).
 # `--all-targets` includes the tests, so the dev-dependencies are checked too.
 cargo +1.85 check --all-targets --all-features
+
+# Check the public API against the version on crates.io (needs cargo-semver-checks
+# and a network connection). Before 1.0 a breaking change is allowed, provided the
+# minor version goes up with it; this gate checks that it did.
+cargo semver-checks check-release
 ```
 
-`t` and `t-doc` are aliases from [`.cargo/config.toml`](https://github.com/VitalyOstanin/hunkpick/blob/master/.cargo/config.toml); the CI workflow
-([`.github/workflows/ci.yml`](https://github.com/VitalyOstanin/hunkpick/blob/master/.github/workflows/ci.yml)) runs the same checks with
+`t` and `t-doc` are aliases from [`.cargo/config.toml`](https://github.com/VitalyOstanin/hunkpick/blob/master/.cargo/config.toml). The list above is
+the everyday loop, not the full set of gates: CI also lints the `fuzz` workspace, which declares
+a workspace of its own that no `--all` here reaches, generates the docs and checks the
+third-party licences. [`CONTRIBUTING.md`](https://github.com/VitalyOstanin/hunkpick/blob/master/CONTRIBUTING.md) carries the complete list. The CI workflow
+([`.github/workflows/ci.yml`](https://github.com/VitalyOstanin/hunkpick/blob/master/.github/workflows/ci.yml)) runs these checks with
 [`cargo-nextest`](https://nexte.st/) for the unit/integration tests and `cargo test --doc` for
 doc tests. Test runner limits (per-test timeout and thread count) live in
 [`.config/nextest.toml`](https://github.com/VitalyOstanin/hunkpick/blob/master/.config/nextest.toml) and apply only under nextest; without it

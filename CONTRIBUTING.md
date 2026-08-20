@@ -23,6 +23,8 @@ the project, run the checks, and submit changes.
   require a working `git` binary.
 - [`cargo-nextest`](https://nexte.st/): the documented way to run the tests, locally and in
   CI. Its profile bounds per-test time and parallelism; plain `cargo test` has neither.
+- [`cargo-semver-checks`](https://github.com/obi1kenobi/cargo-semver-checks): the public API
+  gate below. It needs a network connection — it fetches the released version from crates.io.
 
 ## Development loop
 
@@ -36,9 +38,17 @@ cargo clippy --all-targets --all-features -- -D warnings    # lint, warnings den
 cargo fmt --all --check                                     # formatting (apply with `cargo fmt --all`)
 cargo +1.85 check --all-targets --all-features              # MSRV check (incl. dev-deps)
 cargo semver-checks check-release                           # public API vs the released version
+cargo fmt --manifest-path fuzz/Cargo.toml --all --check     # the fuzz workspace, separately
+cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
 ```
 
-The last one needs [`cargo-semver-checks`](https://github.com/obi1kenobi/cargo-semver-checks)
+The two `--manifest-path fuzz/Cargo.toml` lines are not redundant: `fuzz/Cargo.toml` declares a
+`[workspace]` of its own, so neither `--all` above reaches it (`cargo metadata --no-deps` in the
+root lists one member). CI lints it as a separate step for the same reason, and a fuzz target
+edited without these passes the local loop and fails the pull request.
+
+`cargo semver-checks check-release` needs
+[`cargo-semver-checks`](https://github.com/obi1kenobi/cargo-semver-checks)
 and a network connection: it builds the crate twice — this tree and the version on crates.io —
 and reports any incompatibility the version in `Cargo.toml` does not account for. Before 1.0 a
 breaking change is allowed, provided the minor version goes up with it; that is what the check
