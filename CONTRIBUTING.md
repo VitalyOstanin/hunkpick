@@ -44,6 +44,11 @@ and reports any incompatibility the version in `Cargo.toml` does not account for
 breaking change is allowed, provided the minor version goes up with it; that is what the check
 enforces, and CI gates on it.
 
+The gate checks the version number, not the record. A change to the public API also belongs in
+the `Changed (library API)` section of `CHANGELOG.md` — that section is the only description of
+the contract a consumer has, since the README documents the command line and not the crate. A
+green gate says the number is right, and says nothing about whether the change was written down.
+
 Two modules are outside that contract and marked `#[doc(hidden)]`: `cli`, the argument types
 clap derives the command line from, and `gitenv`, the git plumbing the tests share with the tool.
 The binary and the integration tests are separate crates and cannot see `pub(crate)` items, so

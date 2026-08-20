@@ -138,7 +138,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The `cargo semver-checks` gate added in 0.8.1 counts a new CLI flag as a new public field of an
   exhaustively constructible struct, so without this every release that adds a flag would have to
   be a minor one on account of a type no library user calls. `parser::is_combined_marker`, made
-  public in 0.8.1 for a guard in the binary, is private again; the guard itself moved into the
+  public in 0.8.0 for a guard in the binary, is private again; the guard itself moved into the
   library as `parser::looks_like_a_diff`, so the list of lines that open a diff lives next to the
   code that reads them.
 - **Library API.** `gitenv` gained `feed_and_wait`, `FeedError`, `insulate_config` and the two
@@ -336,6 +336,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the two above, `emit` now round-trips its input byte for byte, not just a
   git-canonical diff.
 - `ParseError` gained a `Combined` variant for merge diffs.
+- `validate::validate_with_git` returns `Result<(), GitCheckError>` instead of
+  `Result<(), String>`, so a caller can tell a rejected diff from a check that never ran.
+- `validate::ValidationError::CountMismatch` carries `side: Side` in place of
+  `field: &'static str`, along with the declared and actual counts.
+- `select::resolve_hunk` takes `addr: &OsStr` instead of `&str`, the same widening the
+  selector parser got above: a hunk address arrives from a command line, which on Unix is
+  bytes.
+- Added: `pub mod gitenv` (the environment variables that decide which repository a `git`
+  child acts on) and `parser::is_combined_marker`. Both are service items rather than
+  contract, and both are `#[doc(hidden)]` or private again in the next release.
 
 ## [0.7.0] - 2026-07-29
 
