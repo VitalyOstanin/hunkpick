@@ -2,8 +2,9 @@
 
 The release pipeline is [`.github/workflows/release.yml`](.github/workflows/release.yml). It is
 triggered by pushing a `v*` tag (or by `workflow_dispatch` on a tag that already exists) and
-enforces that four artefacts agree: the tag, `Cargo.toml`, `Cargo.lock` and `CHANGELOG.md`. This
-document is the checklist for producing a release that satisfies those checks on the first run.
+enforces that five artefacts agree: the tag, `Cargo.toml`, `Cargo.lock`, `fuzz/Cargo.lock` and
+`CHANGELOG.md`. This document is the checklist for producing a release that satisfies those
+checks on the first run.
 
 ## Contents
 
@@ -18,16 +19,22 @@ document is the checklist for producing a release that satisfies those checks on
 Jobs run in this order; everything reversible happens before the one step that is not
 (`cargo publish` can only be undone with `cargo yank`, which does not free the version):
 
-| № | Job                | What it does                                                                 |
-|---|--------------------|-------------------------------------------------------------------------------|
-| 1 | `test`             | Test suite on ubuntu / macOS / Windows at the tagged commit                    |
-| 2 | `lint`             | `clippy -D warnings`, `cargo fmt --check`, docs build                          |
-| 3 | `msrv`             | `cargo check --locked --all-targets` on the minimum supported Rust version     |
-| 4 | `package-binaries` | Builds each target, generates the notices, packs and verifies every archive    |
-| 5 | `publish`          | `cargo publish --locked`, then creates the GitHub Release from the changelog   |
-| 6 | `upload-assets`    | Attaches the archives (built in step 4) to that Release                        |
+| № | Job                | What it does                                                                   |
+|---|--------------------|--------------------------------------------------------------------------------|
+| 1 | `verify-metadata`  | Resolves the tag and checks it against the manifest, both locks and the changelog, before anything is compiled; every other job waits on it |
+| 2 | `test`             | Test suite on ubuntu / macOS / Windows at the tagged commit                     |
+| 3 | `lint`             | `clippy -D warnings`, `cargo fmt --check`, docs build                           |
+| 4 | `msrv`             | `cargo check --locked --all-targets` on the minimum supported Rust version      |
+| 5 | `semver`           | `cargo semver-checks check-release`: the public API against the released version |
+| 6 | `package-binaries` | Builds each target, generates the notices, packs and verifies every archive     |
+| 7 | `publish`          | `cargo publish --locked`, then creates the GitHub Release from the changelog    |
+| 8 | `upload-assets`    | Attaches the archives (built in step 6) to that Release                         |
 
-Consistency checks inside `publish`: the tag matches
+Steps 2 to 5 run in parallel; `package-binaries` waits on 1 to 4, and `publish` on everything
+before it. The tests, lints and gates duplicate CI on purpose: the workflow is triggered by a tag
+push, so a green run on `master` says nothing about the commit being released.
+
+Consistency checks inside `verify-metadata`: the tag matches
 `v<MAJOR>.<MINOR>.<PATCH>[-pre+build]` ([`scripts/release-validate-tag.sh`](scripts/release-validate-tag.sh)),
 the version in `Cargo.toml` equals the tag, both `Cargo.lock` and `fuzz/Cargo.lock` record that
 same version for the `hunkpick` package, and `CHANGELOG.md` has a `## [X.Y.Z]` section
@@ -121,9 +128,9 @@ job; the run then pauses before the one irreversible step.
 
 ## If something fails
 
-- **Before `publish`** (jobs 1–4): nothing is public. Fix the problem on `master`, delete the
+- **Before `publish`** (jobs 1–6): nothing is public. Fix the problem on `master`, delete the
   tag locally and remotely (`git push origin :refs/tags/vX.Y.Z`), and re-tag the new commit.
-- **After `publish`** (jobs 5–6): the crates.io version is permanent. A failed
+- **After `publish`** (jobs 7–8): the crates.io version is permanent. A failed
   `upload-assets` can simply be re-run — the upload is idempotent (`--clobber`), and the
   archives are kept as workflow artifacts for 7 days. If the published version itself is
   broken, `cargo yank --version X.Y.Z` stops new dependents from picking it up, and the fix

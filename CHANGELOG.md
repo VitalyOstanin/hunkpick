@@ -140,6 +140,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the README says its list is the everyday loop and points at CONTRIBUTING.md for the full set
   rather than claiming to be it.
 
+- RELEASING.md describes the pipeline that exists. Its table of jobs still began with `test` and
+  attributed the tag, manifest, lock and changelog checks to `publish`, while they have their own
+  first job (`verify-metadata`) that every other job waits on — the same document said so three
+  sections further down, contradicting its own table, and an operator reading it would have gone
+  looking in the wrong job's log. The intro counted four artefacts that must agree where there
+  are five: `fuzz/Cargo.lock` is checked too. The job numbers in "If something fails" follow the
+  table again.
+
 ### Changed
 
 - A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being
