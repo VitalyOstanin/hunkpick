@@ -59,6 +59,15 @@ limits (per-test timeout and thread count) live in
 it still has no per-test timeout, so a hung test has to be interrupted by hand. Keep tests fast
 and hermetic.
 
+Everything the binary prints stays ASCII: help, errors, hints. Rust writes stdout and stderr as
+UTF-8 whatever the console is set to, and the release ships an `x86_64-pc-windows-msvc` binary,
+so a console on cp866 or cp1251 turns a typographic dash into mojibake mid-sentence. Write `--`
+for a dash, `"` for quotes and `...` for an ellipsis. Two tests hold the rule:
+`every_help_text_is_ascii` (`src/cli.rs`) renders every help page, and
+`no_source_string_literal_leaves_ascii` (`tests/ascii_output.rs`) scans the string literals of
+`src/` outside the test modules. Test fixtures are exempt on purpose -- a path such as `é.txt`
+is exactly the input the parser has to carry through.
+
 ## Generated tests
 
 Three kinds of test run beside the hand-written ones. They exist because the defects that

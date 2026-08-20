@@ -872,7 +872,17 @@ fn a_utf16_diff_is_diagnosed_as_an_encoding_problem() {
         .write_stdin(utf16)
         .assert()
         .code(2);
+    let stderr = assert.get_output().stderr.clone();
     assert.stderr(predicate::str::contains("UTF-16"));
+    // This message is addressed to a Windows user by construction, and a Windows console on
+    // cp866 or cp1251 shows anything above ASCII as mojibake.
+    // `no_source_string_literal_leaves_ascii` holds the rule for the sources; this holds it for
+    // the sentence that actually gets printed.
+    assert!(
+        stderr.is_ascii(),
+        "the encoding diagnostic must be ASCII: {}",
+        String::from_utf8_lossy(&stderr)
+    );
 }
 
 /// A diff arriving through a pipe is the normal case, and it must stay quiet: the terminal hint

@@ -102,6 +102,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their git installation instead of after their own typo. The path is now checked before git is
   started and named in the message at exit 2; if git still fails to start, the message says which
   directory it was to run in.
+- The one non-ASCII character in hunkpick's own output is gone. The encoding diagnostic added in
+  this cycle carried an em dash, and it is addressed by construction to a Windows user, whose
+  console on cp866 or cp1251 shows it as mojibake in the middle of the sentence. The guard added
+  alongside it covered the help texts only, so the character came back in an error message the
+  same week; it now covers every string literal of `src/` outside the test modules.
 
 ### Changed
 

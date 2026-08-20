@@ -237,7 +237,7 @@ fn reject_non_diff(input: &[u8]) -> Result<(), AppError> {
     if let Some(encoding) = utf16_or_32_bom(input) {
         return Err(AppError::Usage(format!(
             "input starts with a {encoding} byte-order mark; hunkpick reads a UTF-8 (or any \
-             ASCII-compatible) byte stream — re-encode the diff, e.g. `iconv -f {encoding} -t \
+             ASCII-compatible) byte stream -- re-encode the diff, e.g. `iconv -f {encoding} -t \
              UTF-8`"
         )));
     }
@@ -246,7 +246,7 @@ fn reject_non_diff(input: &[u8]) -> Result<(), AppError> {
     if let Some(encoding) = utf16_without_bom(input) {
         return Err(AppError::Usage(format!(
             "input looks like {encoding} without a byte-order mark; hunkpick reads a UTF-8 (or \
-             any ASCII-compatible) byte stream — re-encode the diff, e.g. `iconv -f {encoding} \
+             any ASCII-compatible) byte stream -- re-encode the diff, e.g. `iconv -f {encoding} \
              -t UTF-8`"
         )));
     }
