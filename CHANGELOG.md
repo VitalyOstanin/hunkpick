@@ -36,6 +36,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `@@ -1,3 +1,3 @@` at exit 0, while git reads every one of them as a corrupt patch. The leading
   `-` and `+` are now required, and a range component has to be plain ASCII digits.
 
+- Selecting by a content id shared by several sub-hunks scaled as the square of the number of
+  matches, in both time and memory. Reading every id out of `list --json` and passing them back
+  — the documented batch flow — names such an id once per sub-hunk, and each naming both
+  appended a pick per match and re-ran the collision check over every match. A diff of 8 000
+  identical changes (150 KB) took 10 s and 3 GB of RSS; it is now a fraction of a second. The
+  same accumulator defect was reachable through a repeated `*`.
+- The cap on how many indices a selector may materialise (`1048576`) applied to one selector
+  while the number of selectors is bounded only by the length of the command line: 200 copies of
+  `1-1048576` — 2.6 KB of arguments against a four-sub-hunk diff — reached 1.6 GB of RSS before
+  any index was compared against the diff. The cap is now one allowance for the whole
+  invocation, and its message says so.
+
 ### Changed
 
 - A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being

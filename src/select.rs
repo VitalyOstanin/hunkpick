@@ -3,7 +3,7 @@ use crate::renumber::renumber_new_side;
 use crate::split::auto_split_hunk;
 use crate::split::slice_changed_lines;
 use crate::subhunk_id::subhunk_hash;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fmt;
 
@@ -128,17 +128,19 @@ pub fn build_view(patch: &Patch) -> Vec<Vec<Hunk>> {
 /// 3. bare `set` — `*` or an index list, for single-file diffs (the path is resolved later).
 pub fn parse_selectors<S: AsRef<OsStr>>(args: &[S]) -> Result<Vec<Selector>, SelectError> {
     let mut out = Vec::new();
+    // One allowance for the whole invocation, spent by every selector that materialises indices.
+    let mut budget = IndexBudget::new();
     for arg in args {
         let bytes = os_bytes(arg.as_ref());
         // A path that is not valid UTF-8 can only be the `path:set` form: everything else in
         // the grammar is ASCII. Handle it on bytes and skip the textual forms below.
         let Ok(a) = std::str::from_utf8(bytes) else {
-            out.push(parse_binary_path_form(bytes)?);
+            out.push(parse_binary_path_form(bytes, &mut budget)?);
             continue;
         };
         // 1. path:set form. Checked first so a file named "@foo" (addressed "@foo:1") and a
         //    path containing ':' are not misread as an id or a bare set.
-        if let Some(sel) = parse_path_form(a)? {
+        if let Some(sel) = parse_path_form(a, &mut budget)? {
             out.push(sel);
             continue;
         }
@@ -153,7 +155,7 @@ pub fn parse_selectors<S: AsRef<OsStr>>(args: &[S]) -> Result<Vec<Selector>, Sel
         }
         // 3. bare set. A parse failure here is terminal (unlike the path form above), so the
         //    specific reason is surfaced to the user rather than discarded.
-        let indices = parse_index_set(a).map_err(|e| match e {
+        let indices = parse_index_set(a, &mut budget).map_err(|e| match e {
             SetParseError::RemovedRange => SelectError::RemovedRangeForm(a.to_string()),
             e => SelectError::BadSelector(format!("{a} ({e})")),
         })?;
@@ -167,14 +169,14 @@ pub fn parse_selectors<S: AsRef<OsStr>>(args: &[S]) -> Result<Vec<Selector>, Sel
 
 /// Read `arg` as the `path:set` form. `Ok(None)` means it is not that form and the caller is to
 /// try the remaining ones; an `Err` means it is that form and the set inside it is broken.
-fn parse_path_form(arg: &str) -> Result<Option<Selector>, SelectError> {
+fn parse_path_form(arg: &str, budget: &mut IndexBudget) -> Result<Option<Selector>, SelectError> {
     let Some((path, set)) = arg.rsplit_once(':') else {
         return Ok(None);
     };
     if path.is_empty() {
         return Ok(None);
     }
-    match parse_index_set(set) {
+    match parse_index_set(set, budget) {
         Ok(indices) => Ok(Some(Selector::File {
             path: Some(path.as_bytes().to_vec()),
             indices,
@@ -204,7 +206,7 @@ fn os_bytes(arg: &OsStr) -> &[u8] {
 /// Read a selector whose bytes are not valid UTF-8. Only `path:set` can look like that — the
 /// rest of the grammar is ASCII — so the path is taken verbatim and only the set after the
 /// last ':' is parsed as text.
-fn parse_binary_path_form(bytes: &[u8]) -> Result<Selector, SelectError> {
+fn parse_binary_path_form(bytes: &[u8], budget: &mut IndexBudget) -> Result<Selector, SelectError> {
     let shown = String::from_utf8_lossy(bytes).into_owned();
     let Some(colon) = bytes.iter().rposition(|&b| b == b':') else {
         return Err(SelectError::BadSelector(format!(
@@ -217,7 +219,7 @@ fn parse_binary_path_form(bytes: &[u8]) -> Result<Selector, SelectError> {
             "{shown} (the set after ':' must be ASCII)"
         )));
     };
-    let indices = parse_index_set(set).map_err(|e| match e {
+    let indices = parse_index_set(set, budget).map_err(|e| match e {
         SetParseError::RemovedRange => SelectError::RemovedRangeForm(shown.clone()),
         e => SelectError::BadSelector(format!("{shown} ({e})")),
     })?;
@@ -264,7 +266,7 @@ impl fmt::Display for SetParseError {
             SetParseError::ReversedRange { lo, hi } => write!(f, "reversed range: {lo}-{hi}"),
             SetParseError::TooLarge => write!(
                 f,
-                "range too large: at most {MAX_SELECTOR_INDICES} indices per selector"
+                "range too large: at most {MAX_SELECTOR_INDICES} indices across all selectors"
             ),
             SetParseError::RemovedRange => write!(f, "the @lo-hi range form was removed; use @L"),
         }
@@ -273,7 +275,7 @@ impl fmt::Display for SetParseError {
 
 /// Parse the index part of a `File` selector: `*` (all), `INDEX@L<set>` (one sub-hunk cut to a
 /// subset of its changed lines), or a comma-separated index list.
-fn parse_index_set(s: &str) -> Result<IndexSet, SetParseError> {
+fn parse_index_set(s: &str, budget: &mut IndexBudget) -> Result<IndexSet, SetParseError> {
     if s == "*" {
         return Ok(IndexSet::All);
     }
@@ -288,10 +290,10 @@ fn parse_index_set(s: &str) -> Result<IndexSet, SetParseError> {
         let Some(set) = rest.strip_prefix('L') else {
             return Err(SetParseError::RemovedRange);
         };
-        let lines = parse_index_list(set)?;
+        let lines = parse_index_list(set, budget)?;
         return Ok(IndexSet::LineSet { index, lines });
     }
-    parse_index_list(s).map(IndexSet::List)
+    parse_index_list(s, budget).map(IndexSet::List)
 }
 
 /// Parse a 1-based, non-zero position.
@@ -306,14 +308,38 @@ fn parse_pos(s: &str) -> Result<usize, SetParseError> {
     }
 }
 
-/// Upper bound on the number of indices a selector may materialise. The real sub-hunk
+/// Upper bound on the number of indices one invocation may materialise. The real sub-hunk
 /// count is only known later in `select`, so a range like `1-9999999999` from the command
 /// line would otherwise expand into a multi-gigabyte `Vec` before any bound check runs.
 /// This cap is far above any real diff's sub-hunk count; exceeding it is treated as a bad
 /// selector rather than an allocation.
 const MAX_SELECTOR_INDICES: usize = 1 << 20;
 
-fn parse_index_list(s: &str) -> Result<Vec<usize>, SetParseError> {
+/// What is left of [`MAX_SELECTOR_INDICES`] for the rest of the invocation.
+///
+/// The cap used to be per selector, while the number of selectors is bounded only by the length
+/// of the command line — 200 copies of `1-1048576` (2.6 KB of argv) reached 1.6 GB of RSS before
+/// a single index was compared against the diff. One budget for the whole call is what the
+/// constant was introduced to provide.
+struct IndexBudget {
+    left: usize,
+}
+
+impl IndexBudget {
+    fn new() -> Self {
+        Self {
+            left: MAX_SELECTOR_INDICES,
+        }
+    }
+
+    /// Claim `n` indices, or refuse if the invocation has spent its allowance.
+    fn take(&mut self, n: usize) -> Result<(), SetParseError> {
+        self.left = self.left.checked_sub(n).ok_or(SetParseError::TooLarge)?;
+        Ok(())
+    }
+}
+
+fn parse_index_list(s: &str, budget: &mut IndexBudget) -> Result<Vec<usize>, SetParseError> {
     if s.is_empty() {
         return Err(SetParseError::Empty);
     }
@@ -325,17 +351,14 @@ fn parse_index_list(s: &str) -> Result<Vec<usize>, SetParseError> {
             if hi < lo {
                 return Err(SetParseError::ReversedRange { lo, hi });
             }
-            let span = hi - lo + 1;
-            if span > MAX_SELECTOR_INDICES || v.len() + span > MAX_SELECTOR_INDICES {
-                return Err(SetParseError::TooLarge);
-            }
+            // Claimed before the range is materialised: `1-9999999999` must be refused, not
+            // allocated and then refused.
+            budget.take(hi - lo + 1)?;
             v.extend(lo..=hi);
         } else {
-            // Cap single indices too, so a list of many bare indices (`1,1,1,...`) has the same
-            // allocation ceiling as a range.
-            if v.len() + 1 > MAX_SELECTOR_INDICES {
-                return Err(SetParseError::TooLarge);
-            }
+            // Bare indices are charged too, so a list of many of them (`1,1,1,...`) has the
+            // same ceiling as a range.
+            budget.take(1)?;
             v.push(parse_pos(part)?);
         }
     }
@@ -388,6 +411,51 @@ impl Chosen {
     }
 }
 
+/// What the selectors picked out of one file.
+///
+/// Whole sub-hunks live in a set, not a list: naming the same one twice — a repeated `@id`, a
+/// repeated `*`, an index listed twice — asks for the same sub-hunk, and appending a pick per
+/// naming made the accumulator grow as (selectors x matches) instead of as the file. The
+/// duplicates were dropped, but only at emission, after the whole array had been built. Reading
+/// every id out of `list --json` and passing them back is that shape whenever sub-hunks share an
+/// id, and it turned a 150 KB diff into 10 s and 3 GB of RSS.
+#[derive(Default)]
+struct FilePicks {
+    /// 1-based sub-hunk indices taken whole, in sub-hunk order.
+    whole: BTreeSet<usize>,
+    /// `@L` slices, in the order they were named. Held apart from `whole`: a slice is not
+    /// idempotent — two line sets of one sub-hunk are a conflict, not a repeat — so each one
+    /// has to reach [`reject_conflicting_line_set_picks`].
+    lines: Vec<(usize, Vec<usize>)>,
+}
+
+impl FilePicks {
+    /// How many sub-hunks this file contributes to the result. Used by the guard tests that
+    /// assert the accumulator stays the size of the file rather than of the selector list.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.whole.len() + self.lines.len()
+    }
+
+    /// The picks as one list in sub-hunk order, which is old-file order. Equal indices cannot
+    /// occur across the two halves — [`reject_conflicting_line_set_picks`] runs first and
+    /// refuses them — so the order is total.
+    fn into_ordered(self) -> Vec<Chosen> {
+        let mut picks: Vec<Chosen> = self
+            .whole
+            .into_iter()
+            .map(Chosen::Whole)
+            .chain(
+                self.lines
+                    .into_iter()
+                    .map(|(index, lines)| Chosen::Lines { index, lines }),
+            )
+            .collect();
+        picks.sort_by_key(|c| c.index());
+        picks
+    }
+}
+
 /// The name to show for a file in an error message: the path as the user wrote it, or the
 /// diff's own display path when the selector carried no explicit path (a single-file diff).
 fn display_name(patch: &Patch, fi: usize, path: Option<&[u8]>) -> String {
@@ -422,18 +490,25 @@ fn resolve_selectors(
     patch: &Patch,
     selectors: &[Selector],
     subs_cache: &mut BTreeMap<usize, Vec<Hunk>>,
-) -> Result<BTreeMap<usize, Vec<Chosen>>, SelectError> {
-    let mut chosen: BTreeMap<usize, Vec<Chosen>> = BTreeMap::new();
+) -> Result<BTreeMap<usize, FilePicks>, SelectError> {
+    let mut chosen: BTreeMap<usize, FilePicks> = BTreeMap::new();
     // Built once for the whole invocation: every path selector looks its file up here.
     let paths = PathIndex::new(patch);
     // The id index costs a pass over the whole patch, so it is built on first use: an
     // invocation without `@id` selectors never touches a file no selector names.
     let mut ids: Option<IdIndex> = None;
+    // Ids already resolved in this invocation. Resolving one is idempotent — the same matches,
+    // the same collision verdict, the same picks — but not free: the collision check compares
+    // the changed lines of every match against the first, so an id shared by M sub-hunks costs
+    // M comparisons per occurrence. A script that reads the ids out of `list --json` names such
+    // an id once per sub-hunk, which made the check quadratic on its own: 8 000 identical
+    // changes took over six minutes even with the picks deduplicated.
+    let mut resolved_ids: HashSet<u64> = HashSet::new();
     for sel in selectors {
         match sel {
             Selector::Id(id) => {
                 let index = ids.get_or_insert_with(|| IdIndex::new(patch, subs_cache));
-                resolve_id(patch, id, subs_cache, index, &mut chosen)?
+                resolve_id(patch, id, subs_cache, index, &mut chosen, &mut resolved_ids)?
             }
             Selector::File { path, indices } => resolve_file_selector(
                 patch,
@@ -456,7 +531,7 @@ fn resolve_file_selector(
     path: Option<&[u8]>,
     indices: &IndexSet,
     subs_cache: &mut BTreeMap<usize, Vec<Hunk>>,
-    chosen: &mut BTreeMap<usize, Vec<Chosen>>,
+    chosen: &mut BTreeMap<usize, FilePicks>,
 ) -> Result<(), SelectError> {
     let fi = paths.resolve(path)?;
     // A binary file has no sub-hunks; a non-line-set selector picks the whole binary change.
@@ -480,7 +555,7 @@ fn resolve_file_selector(
             // `*` then means "take this entry", the same as for a binary file, so record it
             // even though there is nothing to pick.
             let picks = chosen.entry(fi).or_default();
-            picks.extend((1..=subs.len()).map(Chosen::Whole));
+            picks.whole.extend(1..=subs.len());
         }
         IndexSet::List(v) => {
             // Every index of this selector lands in the same file, so the entry is looked up
@@ -494,7 +569,7 @@ fn resolve_file_selector(
                         display_name(patch, fi, path)
                     )));
                 }
-                picks.push(Chosen::Whole(idx));
+                picks.whole.insert(idx);
             }
         }
         IndexSet::LineSet { index, lines } => {
@@ -507,10 +582,11 @@ fn resolve_file_selector(
             // The concrete range check (against the sub-hunk's changed-line count) and
             // normalisation (sort + dedup, via a `BTreeSet`) happen at emission in
             // `slice_changed_lines`; no need to canonicalise the raw indices here.
-            chosen.entry(fi).or_default().push(Chosen::Lines {
-                index: *index,
-                lines: lines.clone(),
-            });
+            chosen
+                .entry(fi)
+                .or_default()
+                .lines
+                .push((*index, lines.clone()));
         }
     }
     Ok(())
@@ -521,22 +597,22 @@ fn resolve_file_selector(
 /// numbers, and combining `@L` with a whole pick of the same sub-hunk double-counts its lines.
 /// Reject as a usage error before emission; the diff -> stage -> re-diff loop is the way to
 /// combine such pieces.
-fn reject_conflicting_line_set_picks(picks: &[Chosen]) -> Result<(), SelectError> {
-    // Count once per sub-hunk index instead of rescanning the picks for each `@L`: the
+fn reject_conflicting_line_set_picks(picks: &FilePicks) -> Result<(), SelectError> {
+    // Count once per sub-hunk index instead of rescanning the slices for each one: the
     // per-pick scan is quadratic, and a scripted caller can pass a long list of selectors.
-    let mut times_picked: BTreeMap<usize, usize> = BTreeMap::new();
-    for p in picks {
-        *times_picked.entry(p.index()).or_insert(0) += 1;
+    // Only slices are counted here — a whole pick is idempotent and the set already holds it
+    // at most once, so a repeat cannot make a conflict out of nothing.
+    let mut sliced: BTreeMap<usize, usize> = BTreeMap::new();
+    for (index, _) in &picks.lines {
+        *sliced.entry(*index).or_insert(0) += 1;
     }
-    for p in picks {
-        if let Chosen::Lines { index, .. } = p {
-            if times_picked[index] > 1 {
-                return Err(SelectError::LineSelect(format!(
-                    "sub-hunk {index} is addressed by @L together with another \
-                     selection of the same sub-hunk; address it once, or stage the \
-                     pieces in separate rounds"
-                )));
-            }
+    for (index, times) in sliced {
+        if times > 1 || picks.whole.contains(&index) {
+            return Err(SelectError::LineSelect(format!(
+                "sub-hunk {index} is addressed by @L together with another \
+                 selection of the same sub-hunk; address it once, or stage the \
+                 pieces in separate rounds"
+            )));
         }
     }
     Ok(())
@@ -595,7 +671,7 @@ fn materialise_picks(subs: &[Hunk], picks: &[Chosen]) -> Result<Vec<Hunk>, Selec
 /// splits for every referenced file (populated by `resolve_selectors`).
 fn emit_selection(
     patch: &Patch,
-    chosen: BTreeMap<usize, Vec<Chosen>>,
+    chosen: BTreeMap<usize, FilePicks>,
     subs_cache: &BTreeMap<usize, Vec<Hunk>>,
 ) -> Result<Patch, SelectError> {
     let mut files = Vec::new();
@@ -603,7 +679,7 @@ fn emit_selection(
     // Whether the file emitted last ends on the same line its source did — see the flag at the
     // end of this function. Set per file; only the value left by the last one matters.
     let mut ends_on_the_files_last_line = false;
-    for (fi, mut picks) in chosen {
+    for (fi, picks) in chosen {
         last_fi = Some(fi);
         let src = &patch.files[fi];
         let content = match &src.content {
@@ -615,15 +691,10 @@ fn emit_selection(
             }
             FileContent::Text(_) => {
                 reject_conflicting_line_set_picks(&picks)?;
-                // Order by sub-hunk index so emitted hunks follow old-file order and equal-index
-                // whole picks are adjacent for the dedup below. Distinct sub-hunks are disjoint,
-                // so no overlap check is needed: the only same-index multiplicity is a duplicate
-                // whole (dropped here) or a whole+`@L` collision (rejected above).
-                picks.sort_by_key(|c| c.index());
-                // Drop exact duplicate whole selections (a sub-hunk named twice).
-                picks.dedup_by(
-                    |a, b| matches!((a, b), (Chosen::Whole(x), Chosen::Whole(y)) if x == y),
-                );
+                // Ordered by sub-hunk index so emitted hunks follow old-file order. Distinct
+                // sub-hunks are disjoint, so no overlap check is needed, and a duplicate whole
+                // pick can no longer arrive: the accumulator holds those in a set.
+                let picks = picks.into_ordered();
                 let subs = &subs_cache[&fi];
                 // The file's last line is the last line of its last sub-hunk, and it survives
                 // only when that sub-hunk is taken whole — an `@L` cut may drop it.
@@ -686,13 +757,20 @@ fn resolve_id(
     id: &str,
     subs_cache: &mut BTreeMap<usize, Vec<Hunk>>,
     ids: &IdIndex,
-    chosen: &mut BTreeMap<usize, Vec<Chosen>>,
+    chosen: &mut BTreeMap<usize, FilePicks>,
+    resolved: &mut HashSet<u64>,
 ) -> Result<(), SelectError> {
     // Compare 64-bit hashes rather than rendered hex strings to avoid an allocation per
     // sub-hunk across the full scan. `from_str_radix` accepts upper- or lowercase hex.
     let target = u64::from_str_radix(id, 16).map_err(|_| SelectError::UnknownId(id.to_string()))?;
+    // A repeat asks for what the first occurrence already recorded, and its verdict was the
+    // same: an id that resolved cannot come back as unknown or as a collision. Only its cost
+    // would repeat.
+    if resolved.contains(&target) {
+        return Ok(());
+    }
 
-    let matched: Vec<(usize, usize)> = ids.lookup(target);
+    let matched: &[(usize, usize)] = ids.lookup(target);
     if matched.is_empty() {
         return Err(SelectError::UnknownId(id.to_string()));
     }
@@ -703,9 +781,10 @@ fn resolve_id(
     if !all_same_content(&refs) {
         return Err(SelectError::IdCollision(id.to_string()));
     }
-    for (fi, si) in matched {
-        chosen.entry(fi).or_default().push(Chosen::Whole(si));
+    for &(fi, si) in matched {
+        chosen.entry(fi).or_default().whole.insert(si);
     }
+    resolved.insert(target);
     Ok(())
 }
 
@@ -744,8 +823,8 @@ impl IdIndex {
 
     /// Every sub-hunk carrying `target`, in patch order. Byte-identical changes share an id, so
     /// more than one match is normal — the caller checks they really are identical.
-    fn lookup(&self, target: u64) -> Vec<(usize, usize)> {
-        self.by_id.get(&target).cloned().unwrap_or_default()
+    fn lookup(&self, target: u64) -> &[(usize, usize)] {
+        self.by_id.get(&target).map_or(&[], Vec::as_slice)
     }
 }
 
@@ -916,8 +995,24 @@ diff --git a/f b/f
         // The whole range is materialised into a Vec before the real sub-hunk count is
         // checked in `select`. An unbounded `hi` from the command line must be rejected
         // up front rather than allocating gigabytes.
-        assert!(parse_index_list("1-100000000").is_err());
+        assert!(parse_index_list("1-100000000", &mut IndexBudget::new()).is_err());
         assert!(parse_selectors(&["1-100000000".to_string()]).is_err());
+    }
+
+    /// The allowance belongs to the invocation, not to the selector. It used to be checked per
+    /// selector while their number is bounded only by the length of the command line, so 200
+    /// copies of `1-1048576` — 2.6 KB of argv against a four-sub-hunk diff — reached 1.6 GB of
+    /// RSS before a single index was compared against the diff.
+    #[test]
+    fn the_index_allowance_is_shared_by_every_selector() {
+        let one = format!("1-{MAX_SELECTOR_INDICES}");
+        // One selector may spend the whole allowance.
+        assert!(parse_selectors(std::slice::from_ref(&one)).is_ok());
+        // Two may not, however they are spelled.
+        assert!(parse_selectors(&[one.clone(), one.clone()]).is_err());
+        assert!(parse_selectors(&[format!("f:{one}"), format!("g:{one}")]).is_err());
+        // And the allowance is spent by `@L` line sets too, not only by whole-sub-hunk lists.
+        assert!(parse_selectors(&[format!("1@L1-{MAX_SELECTOR_INDICES}"), one]).is_err());
     }
 
     #[test]
@@ -1108,6 +1203,128 @@ diff --git a/f b/f
         assert!(
             elapsed < std::time::Duration::from_secs(60),
             "resolving {RUNS} ids took {elapsed:?}"
+        );
+    }
+
+    /// The other half of the same guarantee, and the shape a script actually produces: every
+    /// change in the file is identical, so they all share one id, and reading the ids out of
+    /// `list --json` yields that id once per sub-hunk. Recording a pick per (occurrence x match)
+    /// made the accumulator grow as the square of the number of changes — 8 000 of them cost
+    /// A repeated `*` is the same accumulator defect reached without ids: each one used to add a
+    /// pick per sub-hunk of the file. Nobody writes it by hand, but the cost belongs to the
+    /// The accumulator must hold one pick per selected sub-hunk, not one per (occurrence x
+    /// match). Every change here is identical, so all of them share one id, and reading the ids
+    /// out of `list --json` yields that id once per sub-hunk — the shape a script produces. A
+    /// pick appended per pair made the accumulator grow as the square of the number of changes
+    /// (8 000 of them cost 10 s and 3 GB of RSS), and the duplicates were only dropped at
+    /// emission, after the whole array had been built. Asserted on the count rather than on
+    /// time or memory: the defect is the count, and measuring it needs no large input.
+    #[test]
+    fn a_shared_id_records_one_pick_per_sub_hunk() {
+        const RUNS: usize = 200;
+        let mut diff = format!(
+            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,{n} +1,{n} @@\n",
+            n = RUNS * 2
+        );
+        // The context differs so the sub-hunks stay separate; the changed lines are identical,
+        // so every sub-hunk hashes to the same id (context is not part of the hash).
+        for i in 0..RUNS {
+            diff.push_str(&format!(" ctx{i}\n-old\n+new\n"));
+        }
+        let p = parse(diff.as_bytes()).unwrap();
+        let ids: Vec<String> = build_view(&p)[0]
+            .iter()
+            .map(|sub| format!("@{}", subhunk_id(&p.files[0], sub)))
+            .collect();
+        assert_eq!(
+            ids.iter().collect::<BTreeSet<_>>().len(),
+            1,
+            "identical changes must share one id"
+        );
+        let sels = parse_selectors(&ids).unwrap();
+
+        let mut subs_cache = BTreeMap::new();
+        let chosen = resolve_selectors(&p, &sels, &mut subs_cache).unwrap();
+        let picks: usize = chosen.values().map(|f| f.len()).sum();
+        assert_eq!(
+            picks, RUNS,
+            "{RUNS} copies of one id matching {RUNS} sub-hunks must record {RUNS} picks"
+        );
+    }
+
+    /// The same accumulator defect reached without ids: each `*` used to add a pick per
+    /// sub-hunk of the file. Nobody repeats `*` by hand, but the cost belongs to the
+    /// accumulator, not to the spelling of the selector.
+    #[test]
+    fn a_repeated_star_records_one_pick_per_sub_hunk() {
+        const RUNS: usize = 200;
+        let mut diff = format!(
+            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,{n} +1,{n} @@\n",
+            n = RUNS * 2
+        );
+        for i in 0..RUNS {
+            diff.push_str(&format!(" ctx{i}\n-old{i}\n+new{i}\n"));
+        }
+        let p = parse(diff.as_bytes()).unwrap();
+        let sels = parse_selectors(&vec!["*".to_string(); RUNS]).unwrap();
+
+        let mut subs_cache = BTreeMap::new();
+        let chosen = resolve_selectors(&p, &sels, &mut subs_cache).unwrap();
+        let picks: usize = chosen.values().map(|f| f.len()).sum();
+        assert_eq!(
+            picks, RUNS,
+            "{RUNS} repeats of `*` over {RUNS} sub-hunks must record {RUNS} picks"
+        );
+
+        // And the selection itself is unchanged by the repetition.
+        let out = select(&p, &sels).unwrap();
+        assert_eq!(out.files[0].hunk_count(), RUNS);
+    }
+
+    /// The other half of the same cost, which deduplicating the picks does not touch: the
+    /// collision check compares the changed lines of every match against the first, so an id
+    /// shared by M sub-hunks costs M comparisons per occurrence. Naming it once per sub-hunk —
+    /// what a script reading `list --json` produces — made that quadratic on its own: 8 000
+    /// identical changes took 389 s with the picks already deduplicated. Kept end-to-end rather
+    /// than structural because the work is inside the check, not in a countable result.
+    #[test]
+    fn a_shared_id_named_once_per_match_stays_linear() {
+        const RUNS: usize = 8_000;
+        let mut diff = format!(
+            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,{n} +1,{n} @@\n",
+            n = RUNS * 2
+        );
+        for i in 0..RUNS {
+            diff.push_str(&format!(" ctx{i}\n-old\n+new\n"));
+        }
+        let p = parse(diff.as_bytes()).unwrap();
+        let ids: Vec<String> = build_view(&p)[0]
+            .iter()
+            .map(|sub| format!("@{}", subhunk_id(&p.files[0], sub)))
+            .collect();
+        assert_eq!(
+            ids.iter().collect::<BTreeSet<_>>().len(),
+            1,
+            "identical changes must share one id"
+        );
+        let sels = parse_selectors(&ids).unwrap();
+
+        let started = std::time::Instant::now();
+        let out = select(&p, &sels).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            out.files[0].hunk_count(),
+            RUNS,
+            "every sub-hunk is selected"
+        );
+        // The nextest profile bounds a test's runtime, but the documented fallback
+        // (`cargo test -- --test-threads=4`) does not: a quadratic regression would run for
+        // minutes there instead of failing. Linear resolution of this input is a fraction of a
+        // second even in a debug build.
+        assert!(
+            elapsed < std::time::Duration::from_secs(60),
+            "resolving {RUNS} copies of one shared id took {elapsed:?}"
         );
     }
 
