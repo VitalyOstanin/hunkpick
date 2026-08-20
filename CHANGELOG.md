@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rebuilt on the way out with a plain space. A diff git calls a corrupt patch came back out as
   one git accepts, at exit 0. Such a header is now refused as malformed (exit 2), the same as any
   other header hunkpick cannot reproduce byte for byte.
+- The sign of a hunk range was not checked at all: `@@ +1,3 +1,3 @@`, `@@ -1,3 1,3 @@`,
+  `@@ -+1,3 +1,3 @@` and `@@ -1,+3 +1,3 @@` all parsed and were rendered back as
+  `@@ -1,3 +1,3 @@` at exit 0, while git reads every one of them as a corrupt patch. The leading
+  `-` and `+` are now required, and a range component has to be plain ASCII digits.
 
 ### Changed
 

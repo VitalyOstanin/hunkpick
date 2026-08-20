@@ -461,8 +461,15 @@ fn parse_hunk_header(line: &[u8]) -> Result<Hunk, ParseError> {
     if it.next().is_some() {
         return Err(bad());
     }
-    let (old_start, old_lines) = parse_range(old.strip_prefix('-').unwrap_or(old))?;
-    let (new_start, new_lines) = parse_range(new.strip_prefix('+').unwrap_or(new))?;
+    // The sign is required, not merely tolerated: `strip_prefix(..).unwrap_or(token)` made a
+    // missing one indistinguishable from a present one, and `str::parse::<u32>` accepts a
+    // leading `+` on top of that. `@@ +1,3 +1,3 @@`, `@@ -1,3 1,3 @@`, `@@ -+1,3 +1,3 @@` and
+    // `@@ -1,+3 +1,3 @@` all parsed and came back out as `@@ -1,3 +1,3 @@` — four more ways to
+    // turn a diff git calls a corrupt patch into one it accepts, at exit 0.
+    let old = old.strip_prefix('-').ok_or_else(bad)?;
+    let new = new.strip_prefix('+').ok_or_else(bad)?;
+    let (old_start, old_lines) = parse_range(old)?;
+    let (new_start, new_lines) = parse_range(new)?;
     Ok(Hunk {
         old_start,
         old_lines,
@@ -474,23 +481,29 @@ fn parse_hunk_header(line: &[u8]) -> Result<Hunk, ParseError> {
 }
 
 fn parse_range(s: &str) -> Result<(u32, u32), ParseError> {
+    let bad = || ParseError::BadHunkHeader(s.to_string());
     let mut parts = s.split(',');
-    let start = parts
-        .next()
-        .and_then(|x| x.parse().ok())
-        .ok_or_else(|| ParseError::BadHunkHeader(s.to_string()))?;
+    let start = parts.next().and_then(count_from).ok_or_else(bad)?;
     let count = match parts.next() {
-        Some(c) => c
-            .parse()
-            .map_err(|_| ParseError::BadHunkHeader(s.to_string()))?,
+        Some(c) => count_from(c).ok_or_else(bad)?,
         None => 1,
     };
     // `-1,3,9` has no meaning in a unified diff; parsing it as `-1,3` would drop the rest on
     // the way out.
     if parts.next().is_some() {
-        return Err(ParseError::BadHunkHeader(s.to_string()));
+        return Err(bad());
     }
     Ok((start, count))
+}
+
+/// One component of a range: plain ASCII digits, nothing else. `str::parse::<u32>` also takes a
+/// leading `+`, which would let `-1,+3` through and render it back as `-1,3` — the input
+/// rewritten on the way out.
+fn count_from(s: &str) -> Option<u32> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
 }
 
 #[cfg(test)]
@@ -926,6 +939,26 @@ rename to new
             assert!(
                 matches!(parse(src.as_bytes()), Err(ParseError::BadHunkHeader(_))),
                 "separator {sep:?} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn a_range_without_its_sign_or_with_a_stray_one_is_rejected() {
+        // The sign used to be stripped with `unwrap_or(token)`, so its absence read the same as
+        // its presence, and `str::parse::<u32>` took a leading `+` on top of that. Every header
+        // below came back out as `@@ -1,3 +1,3 @@` at exit 0, while git reads all four as a
+        // corrupt patch (or as garbage).
+        for header in [
+            "@@ +1,3 +1,3 @@",
+            "@@ -1,3 1,3 @@",
+            "@@ -+1,3 +1,3 @@",
+            "@@ -1,+3 +1,3 @@",
+        ] {
+            let src = format!("--- a/f\n+++ b/f\n{header}\n a\n-b\n+B\n c\n");
+            assert!(
+                matches!(parse(src.as_bytes()), Err(ParseError::BadHunkHeader(_))),
+                "header {header:?} must not parse"
             );
         }
     }
