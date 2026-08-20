@@ -16,6 +16,12 @@ inputs:
       rehearsal, where the version is read from Cargo.toml instead.
     required: false
     default: ''
+  dry_run:
+    description: >-
+      The workflow_dispatch dry_run input, as a string. Only decides the `publish`
+      output; the tag resolution above does not depend on it.
+    required: false
+    default: 'false'
 
 outputs:
   tag:
@@ -24,9 +30,14 @@ outputs:
   version:
     description: 'Resolved version without the `v` prefix (e.g. 0.1.0).'
     value: ${{ steps.tag.outputs.version }}
-  rehearsal:
-    description: '`true` when the version came from Cargo.toml because no tag was named.'
-    value: ${{ steps.tag.outputs.rehearsal }}
+  publish:
+    description: >-
+      `true` when this run is meant to publish: a tag push, or a manual run that named a tag
+      and did not ask for a dry run. Everything that must not happen twice — `cargo publish`,
+      the Release, the asset upload — is gated on this one value, because four copies of the
+      same expression in the workflow was four places to keep in agreement. A job-level `if:`
+      cannot read `env`, which is why this is an output rather than a variable.
+    value: ${{ steps.tag.outputs.publish }}
 
 runs:
   using: composite
@@ -37,23 +48,28 @@ runs:
       env:
         EVENT_NAME: ${{ github.event_name }}
         TAG_INPUT: ${{ inputs.tag }}
+        DRY_RUN: ${{ inputs.dry_run }}
       run: |
-        REHEARSAL=false
+        PUBLISH=false
         if [ "$EVENT_NAME" != "workflow_dispatch" ]; then
           TAG="${GITHUB_REF#refs/tags/}"
+          PUBLISH=true
         elif [ -n "$TAG_INPUT" ]; then
           TAG="$TAG_INPUT"
+          # A named tag publishes unless the run asked not to. The input arrives as the string
+          # a checkbox produces, so it is compared as one.
+          [ "$DRY_RUN" = "true" ] || PUBLISH=true
         else
           # A manual run with no tag named is a rehearsal against the checked-out branch: the
           # version comes from the manifest, so the whole pipeline can be exercised before the
           # tag exists. Pushing the tag to create one would already have published the crate,
           # which is the thing a rehearsal is meant to happen before. `--offline` keeps this to
-          # a read of the manifest and lockfile already in the tree.
+          # a read of the manifest and lockfile already in the tree. A run that names no tag
+          # never publishes, whatever `dry_run` says.
           TAG="v$(cargo pkgid --offline | sed -E 's/.*[#@]//')"
-          REHEARSAL=true
         fi
         bash scripts/release-validate-tag.sh "$TAG"
         VERSION="${TAG#v}"
         echo "tag=$TAG" >> "$GITHUB_OUTPUT"
         echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-        echo "rehearsal=$REHEARSAL" >> "$GITHUB_OUTPUT"
+        echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"

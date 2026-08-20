@@ -193,6 +193,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would have been executed during an ordinary `cargo test`. The path is not attacker-supplied,
   so this is hardening rather than a hole.
 
+- "Does this release run publish?" is decided in one place. The expression stood in four
+  verbatim copies — the publish step, the release notes, the Release itself and the asset upload
+  job — and had already been rewritten once in all four at the same time, which is the cost of
+  that arrangement measured. The tag-resolving action answers it as a `publish` output now, and
+  the unused `rehearsal` output it advertised is gone: a value computed, documented and read by
+  nobody sends a reader looking for the place it is used.
+
 ### Changed
 
 - A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being

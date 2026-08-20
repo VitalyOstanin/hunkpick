@@ -59,6 +59,9 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.tag.outputs.version }}
+      # "Does this run publish?", resolved once. The steps and the job that must not run twice
+      # read this instead of each repeating the expression that decides it.
+      publish: ${{ steps.tag.outputs.publish }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -72,6 +75,7 @@ jobs:
         uses: ./.github/actions/resolve-release-tag
         with:
           tag: ${{ inputs.tag }}
+          dry_run: ${{ inputs.dry_run }}
 
       - name: Verify tag matches Cargo.toml and Cargo.lock versions
         env:
@@ -289,13 +293,13 @@ jobs:
         run: cargo publish --dry-run --locked
 
       - name: cargo publish
-        if: ${{ github.event_name == 'push' || (inputs.tag != '' && inputs.dry_run == false) }}
+        if: ${{ needs.verify-metadata.outputs.publish == 'true' }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked
 
       - name: Extract release notes from CHANGELOG.md
-        if: ${{ github.event_name == 'push' || (inputs.tag != '' && inputs.dry_run == false) }}
+        if: ${{ needs.verify-metadata.outputs.publish == 'true' }}
         # The tag was resolved and checked by verify-metadata; this job reads its outputs
         # rather than resolving it a second time.
         env:
@@ -313,7 +317,7 @@ jobs:
           fi
 
       - name: Create GitHub Release
-        if: ${{ github.event_name == 'push' || (inputs.tag != '' && inputs.dry_run == false) }}
+        if: ${{ needs.verify-metadata.outputs.publish == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.verify-metadata.outputs.tag }}
@@ -451,8 +455,10 @@ jobs:
   # that leaves an inconsistent published version behind.
   upload-assets:
     name: Upload release assets
-    needs: [publish, package-binaries]
-    if: ${{ github.event_name == 'push' || (inputs.tag != '' && inputs.dry_run == false) }}
+    # `verify-metadata` is in `needs` for its `publish` output: a job reads outputs only from
+    # the jobs it declares, and reaching them through `publish` is not enough.
+    needs: [verify-metadata, publish, package-binaries]
+    if: ${{ needs.verify-metadata.outputs.publish == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
