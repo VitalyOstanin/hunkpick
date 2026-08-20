@@ -7,8 +7,8 @@
 // shrinking: a failure is reported as the smallest diff that still fails, not as the 30-line
 // one that happened to be generated.
 
-use hunkpick::model::{FileContent, Patch};
-use hunkpick::{emit, parser, renumber, select, validate};
+use hunkpick::model::{FileContent, LineKind, Patch};
+use hunkpick::{emit, list, parser, renumber, select, split, validate};
 use proptest::prelude::*;
 
 /// One generated change at a line of the base file. `TwoBlocks` is a single hunk holding two
@@ -20,6 +20,11 @@ enum Edit {
     Insert,
     Delete,
     TwoBlocks,
+    /// A replacement whose changed lines carry a fixed text rather than one derived from the
+    /// line number. A content id hashes the path and the changed lines only, so two of these in
+    /// one diff share an id — the shape `@id` collision handling exists for, and the one every
+    /// other edit here avoids by construction.
+    Repeated,
 }
 
 /// The shape of a generated diff. Rendering happens in [`render`]; keeping the shape separate
@@ -41,6 +46,11 @@ struct DiffShape {
     /// Line numbers sit just below `u32::MAX` — a diff carved out of a huge generated file, and
     /// the range where the overlap arithmetic used to wrap.
     high_line_numbers: bool,
+    /// The `-- ` / version signature `git format-patch` appends after the last hunk. Held in
+    /// `FileDiff::trailer` rather than among the hunks, and moved by `split_file_hunk`: a line
+    /// left at its old position ends up emitted between two pieces, where `git apply` reads it
+    /// as a fragment without a header.
+    signature: bool,
 }
 
 fn arb_shape() -> impl Strategy<Value = DiffShape> {
@@ -49,10 +59,12 @@ fn arb_shape() -> impl Strategy<Value = DiffShape> {
         Just(Edit::Insert),
         Just(Edit::Delete),
         Just(Edit::TwoBlocks),
+        Just(Edit::Repeated),
     ];
     (
         2usize..24,
         prop::collection::vec((0usize..24, edit), 1..6),
+        any::<bool>(),
         any::<bool>(),
         any::<bool>(),
         any::<bool>(),
@@ -68,6 +80,7 @@ fn arb_shape() -> impl Strategy<Value = DiffShape> {
                 preamble,
                 no_trailing_newline,
                 high_line_numbers,
+                signature,
             )| DiffShape {
                 lines,
                 edits,
@@ -76,6 +89,7 @@ fn arb_shape() -> impl Strategy<Value = DiffShape> {
                 preamble,
                 no_trailing_newline,
                 high_line_numbers,
+                signature,
             },
         )
 }
@@ -148,6 +162,17 @@ fn render(shape: &DiffShape) -> Vec<u8> {
                     (b'-', format!("line {}", start + 1)),
                 ],
             ),
+            // Changed lines that do not mention `start`, so two of these hash to the same
+            // content id however far apart they sit. The context still moves with the hunk.
+            Edit::Repeated => (
+                2,
+                2,
+                vec![
+                    (b' ', format!("line {start}")),
+                    (b'-', "repeated".to_string()),
+                    (b'+', "REPEATED".to_string()),
+                ],
+            ),
             // Two change runs separated by a context line: one hunk, two sub-hunks. This is what
             // auto-splitting is for, and none of the shapes above reach it.
             Edit::TwoBlocks => (
@@ -191,6 +216,15 @@ fn render(shape: &DiffShape) -> Vec<u8> {
     // shape's `no_eof_newline` then went untested rather than tested.
     if shape.no_eof_newline && hunks > 0 {
         out.extend_from_slice(b"\\ No newline at end of file");
+        out.extend_from_slice(nl);
+    }
+
+    // After the marker, as `git format-patch` writes it: the trailing space on `-- ` is part of
+    // the signature and is what tells a mail reader where the patch ends.
+    if shape.signature && hunks > 0 {
+        out.extend_from_slice(b"-- ");
+        out.extend_from_slice(nl);
+        out.extend_from_slice(b"2.53.0");
         out.extend_from_slice(nl);
     }
 
@@ -269,6 +303,86 @@ proptest! {
         prop_assert_eq!(twice, once);
     }
 
+    /// A content id addresses every sub-hunk whose changed lines are byte-identical, and
+    /// `list --json` reports how many that is as `id_count`. The two have to agree: the
+    /// documented batch flow reads an id out of the listing and passes it back, and a selection
+    /// that took fewer sub-hunks than the listing promised would stage part of a change without
+    /// saying so. Reachable only because one generated edit repeats its text — every other
+    /// shape derives the changed lines from the line number, so no two ever collide.
+    #[test]
+    fn an_id_selects_exactly_the_sub_hunks_the_listing_counts(shape in arb_shape()) {
+        let src = render(&shape);
+        let patch = parser::parse(&src).expect("generated diffs are well formed");
+        prop_assume!(sub_hunk_count(&patch) > 0);
+
+        let listing: serde_json::Value =
+            serde_json::from_str(&list::list_json(&patch)).expect("the listing is JSON");
+        let hunks = listing[0]["hunks"].as_array().expect("a file with sub-hunks");
+        // The id shared by the most sub-hunks: with a repeated edit it names several, otherwise
+        // it names one, and both are worth asserting.
+        let (id, id_count) = hunks
+            .iter()
+            .map(|h| {
+                (
+                    h["id"].as_str().expect("an id").to_string(),
+                    h["id_count"].as_u64().expect("a count") as usize,
+                )
+            })
+            .max_by_key(|(_, count)| *count)
+            .expect("at least one sub-hunk");
+
+        let selectors = select::parse_selectors(&[format!("@{id}")]).expect("an id parses");
+        let result = select::select(&patch, &selectors).expect("an id from the listing resolves");
+        prop_assert_eq!(sub_hunk_count(&result), id_count);
+        prop_assert_eq!(validate::validate_internal(&result), Ok(()));
+    }
+
+    /// Splitting a hunk moves every later hunk down, and the lines recorded after a hunk have to
+    /// move with it. A signature left at its old position is emitted between two pieces, where
+    /// `git apply` reads it as a patch fragment without a header — and hunkpick, which checks
+    /// hunk bodies rather than the lines between them, reports success. Nothing generated
+    /// reached this before: `git diff` output carries no trailing lines at all.
+    #[test]
+    fn splitting_keeps_the_signature_after_the_last_piece(shape in arb_signed_shape()) {
+        let src = render(&shape);
+        let patch = parser::parse(&src).expect("generated diffs are well formed");
+        prop_assume!(!patch.files[0].trailer.is_empty());
+        let FileContent::Text(hunks) = &patch.files[0].content else {
+            unreachable!("the generator writes text files")
+        };
+        // Only a hunk with a context line strictly inside it can be cut; that is the two-block
+        // shape, which `arb_signed_shape` puts first but the render loop may still drop.
+        let Some((hi, cut)) = hunks
+            .iter()
+            .enumerate()
+            .find_map(|(i, h)| interior_context_line(h).map(|c| (i, c)))
+        else {
+            return Ok(());
+        };
+
+        let mut out = patch.clone();
+        let pieces = split::split_file_hunk(&mut out.files[0], hi, &[cut])
+            .expect("a cut at an interior context line");
+        prop_assume!(pieces > 1);
+
+        let hunk_count = match &out.files[0].content {
+            FileContent::Text(h) => h.len(),
+            FileContent::Binary(_) => unreachable!(),
+        };
+        for (at, line) in &out.files[0].trailer {
+            prop_assert_eq!(
+                *at,
+                hunk_count,
+                "the signature {:?} has to stay after the last piece",
+                String::from_utf8_lossy(line)
+            );
+        }
+        // And the result reads back as what it is, rather than as a fragment without a header.
+        let text = emit::emit(&out);
+        let again = parser::parse(&text).expect("a split diff parses");
+        prop_assert_eq!(&again, &out);
+    }
+
     /// Selecting every sub-hunk keeps every change of the input: the same added and deleted
     /// line counts come out. Auto-splitting may redraw the hunk boundaries, but it may not
     /// lose or invent a line.
@@ -298,4 +412,36 @@ fn change_counts(patch: &Patch) -> (u32, u32) {
         }
     }
     (added, deleted)
+}
+
+/// A shape that carries the signature and, in front of its own edits, a two-block hunk — the
+/// only generated shape with a context line strictly inside it, and therefore the only one
+/// `split --at` can cut. Without it nearly every case is rejected before it tests anything.
+fn arb_signed_shape() -> impl Strategy<Value = DiffShape> {
+    arb_shape().prop_map(|mut shape| {
+        shape.signature = true;
+        shape.edits.insert(0, (0, Edit::TwoBlocks));
+        shape
+    })
+}
+
+/// A new-file line number of a context line strictly inside the hunk — a place `split --at`
+/// accepts. `None` when the hunk has no interior context line, which is most of them.
+fn interior_context_line(h: &hunkpick::model::Hunk) -> Option<u32> {
+    let mut new_no = h.new_start;
+    let last = h.lines.len() - 1;
+    let mut found = None;
+    for (i, l) in h.lines.iter().enumerate() {
+        match l.kind {
+            LineKind::Del => continue,
+            LineKind::Context | LineKind::Add => {
+                let here = new_no;
+                new_no += 1;
+                if found.is_none() && i > 0 && i < last && matches!(l.kind, LineKind::Context) {
+                    found = Some(here);
+                }
+            }
+        }
+    }
+    found
 }

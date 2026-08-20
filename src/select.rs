@@ -465,6 +465,17 @@ fn display_name(patch: &Patch, fi: usize, path: Option<&[u8]>) -> String {
 
 /// Build the result patch: resolve `selectors` against `patch`, cut or clone the addressed
 /// sub-hunks, and recompute the new-side anchors so the result stands on its own.
+///
+/// # Precondition
+///
+/// `patch` must be a diff [`crate::validate::validate_input`] accepts. Selection copies hunk
+/// headers from the input, so a header whose counts disagree with its body — six old lines
+/// declared over a body of three — comes back out of the result with the same disagreement,
+/// and the result then fails [`crate::validate::validate_internal`]. That is a defect of the
+/// input, not something selection repairs or reports: the CLI screens the diff before it
+/// selects (`load_and_parse`), and a library caller has to do the same. A fuzzing run found
+/// exactly this shape; `select_carries_an_inconsistent_header_into_its_result` records the
+/// behaviour.
 pub fn select(patch: &Patch, selectors: &[Selector]) -> Result<Patch, SelectError> {
     // Auto-split lazily, only for files a selector actually names, and cache by file index so
     // each referenced file is split once (selectors may target the same file repeatedly). The
@@ -1699,5 +1710,42 @@ diff --git a/f b/f
         let p = parse(REPLACEMENT.as_bytes()).unwrap();
         let sels = parse_selectors(&["1@L1,2".to_string(), "1@L3,4".to_string()]).unwrap();
         assert!(matches!(select(&p, &sels), Err(SelectError::LineSelect(_))));
+    }
+
+    /// The shape a scheduled fuzzing run turned up: a header declaring six old lines over a
+    /// body of three. Selection is not the layer that notices — it copies the header it was
+    /// given, so the disagreement survives into the result and `validate_internal` then
+    /// rejects it. Recorded as behaviour, not repaired here: the caller screens the input
+    /// (`validate_input`), which is what the CLI does before it selects and what the
+    /// precondition on `select` now says. The input itself lived only in one machine's
+    /// `fuzz/artifacts/`; this is where it lives now.
+    #[test]
+    fn select_carries_an_inconsistent_header_into_its_result() {
+        const HEADER_OVERSTATES_THE_BODY: &str = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,6 +1,6 @@
+ a
+-b
++B
+";
+        let p = parse(HEADER_OVERSTATES_THE_BODY.as_bytes()).unwrap();
+        // Parsing takes it: the counts are read, not checked against what follows.
+        assert!(crate::validate::validate_input(&p).is_err());
+
+        let sels = parse_selectors(&["*".to_string()]).unwrap();
+        let out = select(&p, &sels).expect("selection itself succeeds");
+        let FileContent::Text(hunks) = &out.files[0].content else {
+            panic!("a text file entry");
+        };
+        assert_eq!(
+            hunks[0].old_lines, 6,
+            "the header is copied, not recomputed from the body"
+        );
+        assert!(
+            crate::validate::validate_internal(&out).is_err(),
+            "so the result inherits the disagreement and fails the output check"
+        );
     }
 }

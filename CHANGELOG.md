@@ -46,6 +46,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `1-1048576` — 2.6 KB of arguments against a four-sub-hunk diff — reached 1.6 GB of RSS before
   any index was compared against the diff. The cap is now one allowance for the whole
   invocation, and its message says so.
+- The defect a scheduled fuzzing run found — a hunk header declaring six old lines over a body
+  of three, whose selection then failed the tool's own output check — was closed by making the
+  fuzz target skip such input, and nothing recorded it afterwards. The precondition is now
+  stated on `select`, the crate example screens its input the way the CLI does, and
+  `select_carries_an_inconsistent_header_into_its_result` holds the shape, which until now
+  existed only in one machine's `fuzz/artifacts/`.
+- The `selectors` fuzz target recounts a hunk header from its body instead of skipping the
+  input. Skipping cost roughly a third of the parsed stream — the mutations libFuzzer favours
+  break the header-to-body correspondence more often than not — so most of what it generated no
+  longer reached the selection code the target exists for.
+- Fuzz seeds are checked by `tests/fuzz_seeds.rs`, which found three that had stopped reaching
+  the code they were written for: `simple-content-id` named a made-up id, `two-files-path-index`
+  named a path absent from its own diff, and `two-files-star` used a bare `*` on a multi-file
+  diff, which is a usage error. Each was silently skipped by the target rather than reported. A
+  seed for the `@id` collision path was added, and the byte-identical `parse/` and `roundtrip/`
+  seed directories were merged into one `diff/`.
+- The property tests reach two shapes they could not generate before: an edit whose changed
+  lines repeat (so several sub-hunks share a content id, and a selection by that id is checked
+  against `id_count` from `list --json`), and a `git format-patch` signature after the last
+  hunk (so the trailing-line shift in `split_file_hunk` is covered by something other than one
+  example).
 - Fuzzing is run from `scripts/fuzz-all.sh` and `scripts/fuzz-repro.sh` instead of a command
   copied out of the guides. The documented command was missing `mkdir -p fuzz/corpus/<target>`,
   and the corpus directory is gitignored, so on a fresh clone libFuzzer refused to start; the

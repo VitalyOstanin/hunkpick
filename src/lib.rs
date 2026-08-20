@@ -17,7 +17,7 @@
 //! - [`error`] — application errors with process exit codes.
 //!
 //! ```
-//! use hunkpick::{emit, model, parser, select};
+//! use hunkpick::{emit, model, parser, select, validate};
 //!
 //! // A hunk with two changes separated by context auto-splits into two sub-hunks.
 //! let diff = "\
@@ -33,6 +33,11 @@
 //!  e
 //! ";
 //! let patch: model::Patch = parser::parse(diff.as_bytes())?;
+//!
+//! // Screen the input before selecting: parsing accepts a hunk header whose counts
+//! // disagree with its body, and selection copies that header into its result rather
+//! // than repairing it. The CLI does this in `load_and_parse`; a library caller has to.
+//! validate::validate_input(&patch)?;
 //!
 //! // Take only the second one; the result is a diff of its own, with the new-side
 //! // anchors recomputed so `git apply` can locate it.

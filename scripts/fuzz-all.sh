@@ -37,8 +37,12 @@ export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}"
 
 for target in "${TARGETS[@]}"; do
     mkdir -p "fuzz/corpus/${target}" || exit 1
+    # A target reads either its own seeds (selectors: diff, NUL, selector lines) or the
+    # shared set of plain diffs, which parse and roundtrip both take as-is.
+    seeds="fuzz/seeds/${target}"
+    [ -d "$seeds" ] || seeds="fuzz/seeds/diff"
     if ! cargo fuzz run --target "$TRIPLE" "$target" \
-        "fuzz/corpus/${target}" "fuzz/seeds/${target}" \
+        "fuzz/corpus/${target}" "$seeds" \
         -- -max_total_time="$SECONDS_PER_TARGET" \
         -dict=fuzz/dictionaries/diff.dict \
         -print_final_stats=1 \
