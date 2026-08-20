@@ -2,7 +2,7 @@ use crate::model::*;
 use crate::renumber::{anchor, expected_new_start};
 use std::fmt;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// Which side of a hunk header a count belongs to.
@@ -249,24 +249,63 @@ fn check_one_hunk(
 /// reported a missing `git` as a rejected diff.
 #[derive(Debug)]
 pub enum GitCheckError {
-    /// `git` could not be started — absent from `PATH`, not executable, no fork available.
-    Spawn(std::io::Error),
+    /// `git` could not be started — absent from `PATH`, not executable, no fork available, or
+    /// the working directory it was to run in unusable. Carries that directory: `spawn` reports
+    /// a missing binary and a missing directory with the same `NotFound`, and the message has to
+    /// tell the caller which of the two they are looking at.
+    Spawn {
+        /// What `Command::spawn` reported.
+        source: std::io::Error,
+        /// The working directory the child was to run in (the value of `-C DIR`).
+        dir: PathBuf,
+    },
     /// Feeding the diff to git, or collecting its output, failed.
     Io(std::io::Error),
     /// The thread writing the diff to git's stdin panicked.
     WriterPanicked,
     /// git ran and refused the diff. Carries its stderr.
     Rejected(String),
+    /// git ran but never reached a verdict: a fatal error of its own (a broken repository, an
+    /// unusable configuration — exit 128) or death by signal (`code` is `None` on Unix). This
+    /// says nothing about the diff, so it must not be reported as a rejection.
+    Failed {
+        /// git's exit status, or `None` when a signal ended it.
+        code: Option<i32>,
+        /// Whatever git managed to say; empty when it was killed outright.
+        stderr: String,
+    },
 }
 
 impl fmt::Display for GitCheckError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GitCheckError::Spawn(e) => write!(f, "failed to run git: {e}"),
+            GitCheckError::Spawn { source, dir } => {
+                write!(f, "failed to run git in {}: {source}", dir.display())
+            }
             GitCheckError::Io(e) => write!(f, "git check failed: {e}"),
             GitCheckError::WriterPanicked => write!(f, "the thread feeding git panicked"),
             GitCheckError::Rejected(stderr) => {
                 write!(f, "git apply --check rejected the result diff: {stderr}")
+            }
+            GitCheckError::Failed { code, stderr } => {
+                let how = match code {
+                    Some(c) => format!("exited with code {c}"),
+                    None => "was killed by a signal".to_string(),
+                };
+                // An empty stderr is the whole point of naming the status: a git killed by the
+                // OOM killer says nothing at all, and "no verdict" with a blank reason reads as
+                // a verdict with a blank reason.
+                if stderr.is_empty() {
+                    write!(
+                        f,
+                        "git apply --check {how} without a diagnostic; the result diff was not checked"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "git apply --check {how} without checking the result diff: {stderr}"
+                    )
+                }
             }
         }
     }
@@ -293,7 +332,10 @@ pub fn validate_with_git(diff_bytes: &[u8], dir: &Path) -> Result<(), GitCheckEr
     // git's stderr below is decoded lossily and shown next to hunkpick's own ASCII-English
     // text; pinning the locale keeps it English and keeps its bytes UTF-8.
     crate::gitenv::pin_message_locale(&mut cmd);
-    let mut child = cmd.spawn().map_err(GitCheckError::Spawn)?;
+    let mut child = cmd.spawn().map_err(|source| GitCheckError::Spawn {
+        source,
+        dir: dir.to_path_buf(),
+    })?;
     // Feed stdin from a separate thread while this one drains stdout/stderr. Writing the whole
     // diff first would deadlock if git filled its stderr pipe (typically 64 KiB) before reading
     // the patch to the end — plausible on a large diff that git rejects hunk by hunk.
@@ -316,11 +358,16 @@ pub fn validate_with_git(diff_bytes: &[u8], dir: &Path) -> Result<(), GitCheckEr
         _ => {}
     }
     let output = output.map_err(GitCheckError::Io)?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(GitCheckError::Rejected(stderr.trim().to_string()))
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    match output.status.code() {
+        Some(0) => Ok(()),
+        // `git apply --check` answers 1, and only 1, when the patch does not apply; that is the
+        // only status carrying a verdict about the diff. 128 is a fatal error of git's own and
+        // `None` is death by signal — neither looked at the patch, and calling either a
+        // rejection blames hunkpick's output for a broken environment (ADR 0013 keeps exit 70
+        // for a result hunkpick itself produced).
+        Some(1) => Err(GitCheckError::Rejected(stderr)),
+        code => Err(GitCheckError::Failed { code, stderr }),
     }
 }
 

@@ -580,9 +580,9 @@ original (one hunk becomes several), but the applied result is the same.
 | Code | Meaning                                                         |
 |------|-----------------------------------------------------------------|
 |    0 | Success                                                         |
-|    2 | Usage error: bad flag, bad selector, parse error, binary/non-diff input, input over size limit |
-|   70 | Verification failure (internal consistency, or `git apply --check` rejecting the result) |
-|   74 | I/O error: reading stdin, writing stdout, or being unable to run `git` for `--verify-result-diff-git` |
+|    2 | Usage error: bad flag, bad selector, parse error, binary/non-diff input, input over size limit, `-C DIR` not naming a directory |
+|   70 | Verification failure (internal consistency, `git apply --check` rejecting the result, or a violated internal invariant) |
+|   74 | I/O error: reading stdin, writing stdout, or not getting a verdict out of `git` for `--verify-result-diff-git` — it would not start, or it failed on its own before looking at the diff |
 |  130 | Interrupted by SIGINT (default signal disposition: 128 + 2)     |
 |  143 | Terminated by SIGTERM (default signal disposition: 128 + 15)    |
 

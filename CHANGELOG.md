@@ -89,6 +89,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already listed the two exceptions. The README described the selector index ceiling as per
   selector, which it no longer is, and called two of the four lossy JSON text fields lossy.
 
+- Only git's own verdict now decides exit 70 for `--verify-result-diff-git`. `git apply --check`
+  answers 1, and only 1, when a patch does not apply; every other status is git failing before it
+  looked at the diff. A repository git refuses to read (`fatal: bad config line …`, exit 128) was
+  reported as `git apply --check rejected the result diff`, and a git killed by a signal — the OOM
+  killer, a timeout — produced the same sentence with nothing after the colon. Both now name the
+  status and exit 74, so exit 70 keeps meaning what ADR 0013 reserves it for: a result hunkpick
+  itself produced.
+- `-C DIR` naming something that is not a directory is reported against that argument. A mistyped
+  path reaches `Command::spawn` as the same `NotFound` a missing `git` binary does, so both printed
+  `failed to run git: No such file or directory (os error 2)` at exit 74 and sent the caller after
+  their git installation instead of after their own typo. The path is now checked before git is
+  started and named in the message at exit 2; if git still fails to start, the message says which
+  directory it was to run in.
+
 ### Changed
 
 - A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being
@@ -103,6 +117,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the new `SplitError::NotATextEntry` and `SplitError::OutOfBounds`. The CLI resolves addresses
   before it splits, so this only concerns a direct library caller; adding the two variants is a
   breaking change for a caller that matches `SplitError` exhaustively.
+- **Library API.** `validate::GitCheckError::Spawn` carries the working directory alongside the
+  `io::Error` (`Spawn { source, dir }` instead of `Spawn(io::Error)`), and the new variant
+  `Failed { code, stderr }` reports a git that never reached a verdict. Both are breaking changes
+  for a caller that constructs or exhaustively matches `GitCheckError`.
 - The MSRV gate now builds on the minimum supported version it names. `rust-toolchain.toml`
   pins the repository to `stable`, and a toolchain file wins over an installed default, so both
   the CI job and the release job that `publish` waits on compiled on stable and reported success

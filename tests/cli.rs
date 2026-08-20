@@ -745,6 +745,116 @@ fn a_missing_git_binary_is_not_a_verification_failure() {
     assert.stderr(predicate::str::contains("git"));
 }
 
+/// A one-line change to the file `common::repo_with` seeds below, used by the git-check tests.
+const CHANGE_B: &str = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,3 +1,3 @@
+ a
+-b
++B
+ c
+";
+
+/// `git apply --check` answers 1 when the patch does not apply. Anything else is git itself
+/// failing — 128 for a fatal error, no code at all when a signal killed it — and says nothing
+/// about the result diff. Reporting that as exit 70 tells the caller hunkpick produced a broken
+/// diff (ADR 0013 reserves 70 for exactly that) and points them at filing a bug on the tool
+/// instead of at their repository.
+#[test]
+fn a_fatal_git_failure_is_not_a_verification_failure() {
+    let dir = common::repo_with(&[("f", "a\nb\nc\n")]);
+    // An unterminated section header: git reads no config file past it and gives up with
+    // `fatal: bad config line N in file .git/config`, exit 128.
+    let config = dir.path().join(".git").join("config");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str("[core\n");
+    std::fs::write(&config, text).unwrap();
+
+    let assert = Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "1", "--verify-result-diff-git", "-C"])
+        .arg(dir.path())
+        .write_stdin(CHANGE_B)
+        .assert()
+        .code(74);
+    assert.stderr(
+        predicate::str::contains("rejected")
+            .not()
+            .and(predicate::str::contains("128")),
+    );
+}
+
+/// A git killed outright — the OOM killer, a job-control timeout — leaves no exit code and no
+/// stderr. Reported as a rejection that reads "rejected the result diff: " with nothing after
+/// the colon: a verdict with no reason. The status has to be named instead.
+#[test]
+#[cfg(unix)]
+fn a_git_killed_by_a_signal_is_not_a_verification_failure() {
+    let bin = tempfile::tempdir().unwrap();
+    let stub = bin.path().join("git");
+    std::fs::write(&stub, "#!/bin/sh\nkill -TERM $$\n").unwrap();
+    let mut perms = std::fs::metadata(&stub).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&stub, perms).unwrap();
+
+    let assert = Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "1", "--verify-result-diff-git"])
+        .env("PATH", bin.path())
+        .write_stdin(CHANGE_B)
+        .assert()
+        .code(74);
+    assert.stderr(
+        predicate::str::contains("rejected")
+            .not()
+            .and(predicate::str::contains("signal")),
+    );
+}
+
+/// A mistyped `-C DIR` reaches `Command::spawn` as the same `NotFound` a missing `git` binary
+/// does, and used to print the same sentence about git. The argument is the caller's own, and
+/// they were about to go looking for a broken git installation; the path has to be in the text,
+/// and a bad argument value is a usage error (exit 2), not an environment failure.
+#[test]
+fn a_directory_that_does_not_exist_is_reported_against_the_argument() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("no-such-directory");
+
+    let assert = Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "1", "--verify-result-diff-git", "-C"])
+        .arg(&missing)
+        .write_stdin(CHANGE_B)
+        .assert()
+        .code(2);
+    assert.stderr(
+        predicate::str::contains(missing.to_string_lossy().into_owned())
+            .and(predicate::str::contains("-C")),
+    );
+}
+
+/// The same argument pointing at a file rather than a directory: git would report
+/// `Not a directory (os error 20)` against its own name, which is again not where the mistake is.
+#[test]
+fn a_path_that_is_not_a_directory_is_reported_against_the_argument() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("some.diff");
+    std::fs::write(&file, "").unwrap();
+
+    let assert = Command::cargo_bin("hunkpick")
+        .unwrap()
+        .args(["select", "1", "--verify-result-diff-git", "-C"])
+        .arg(&file)
+        .write_stdin(CHANGE_B)
+        .assert()
+        .code(2);
+    assert.stderr(predicate::str::contains(
+        file.to_string_lossy().into_owned(),
+    ));
+}
+
 /// A diff redirected to a file by Windows PowerShell 5.1 lands in UTF-16LE with a BOM. Every
 /// other byte is then NUL, so the binary-input guard fires and sends the reader looking for a
 /// binary file instead of at the encoding of their own patch.

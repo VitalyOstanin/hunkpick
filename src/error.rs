@@ -15,8 +15,10 @@ pub enum AppError {
     Verify(String),
     /// I/O error reading stdin or writing stdout.
     Io(String),
-    /// Unexpected internal error. Reserved for future use: no current code path constructs
-    /// it, but it keeps a distinct exit-code slot for invariant violations should one arise.
+    /// Unexpected internal error: an invariant of hunkpick's own broke. Constructed where the
+    /// thread feeding `git apply --check` panics (`GitCheckError::WriterPanicked`) — nothing
+    /// about the caller's input explains that, and it shares exit code 70 with `Verify` because
+    /// both say the fault is hunkpick's.
     Internal(String),
 }
 

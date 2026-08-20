@@ -289,6 +289,30 @@ fn usage<E: std::fmt::Display>(e: E) -> AppError {
 }
 
 /// Verify the result diff (internal check by default, optional git check) then emit it.
+/// The working tree `git apply --check` is to run in: the value of `-C DIR`, or the current
+/// directory.
+///
+/// A `-C DIR` that does not name a directory is rejected here rather than left to `spawn`,
+/// which reports a missing directory with the same `NotFound` as a missing `git` binary. The
+/// caller typed this path a moment ago; sending them after their git installation instead of
+/// after their own typo costs more than the check does. A bad argument value is a usage error
+/// (exit 2, ADR 0013), not an environment failure.
+fn check_dir(dir: Option<&Path>) -> Result<PathBuf, AppError> {
+    let Some(dir) = dir else {
+        return Ok(PathBuf::from("."));
+    };
+    match std::fs::metadata(dir) {
+        Ok(m) if m.is_dir() => Ok(dir.to_path_buf()),
+        Ok(_) => Err(AppError::Usage(format!(
+            "-C {}: not a directory",
+            dir.display()
+        ))),
+        // The directory can still disappear between this call and `spawn`; that race lands in
+        // `GitCheckError::Spawn`, which names the directory too.
+        Err(e) => Err(AppError::Usage(format!("-C {}: {e}", dir.display()))),
+    }
+}
+
 fn emit_verified(out: &model::Patch, verify: &VerifyOpts) -> Result<(), AppError> {
     if !verify.no_verify_result_diff_internal {
         validate::validate_internal(out)
@@ -296,16 +320,17 @@ fn emit_verified(out: &model::Patch, verify: &VerifyOpts) -> Result<(), AppError
     }
     let bytes = emit::emit(out);
     if verify.verify_result_diff_git {
-        let dir = verify.dir.clone().unwrap_or_else(|| PathBuf::from("."));
+        let dir = check_dir(verify.dir.as_deref())?;
         // Only a verdict from git says anything about the result diff. A git that would not
-        // start, or a failure while talking to it, means the check never happened — reporting
-        // that as exit 70 would blame the output for a broken environment.
+        // start, a failure while talking to it, or a git that gave up on its own means the
+        // check never happened — reporting that as exit 70 would blame the output for a
+        // broken environment.
         validate::validate_with_git(&bytes, &dir).map_err(|e| match e {
             validate::GitCheckError::Rejected(_) => AppError::Verify(e.to_string()),
             validate::GitCheckError::WriterPanicked => AppError::Internal(e.to_string()),
-            validate::GitCheckError::Spawn(_) | validate::GitCheckError::Io(_) => {
-                AppError::Io(e.to_string())
-            }
+            validate::GitCheckError::Spawn { .. }
+            | validate::GitCheckError::Io(_)
+            | validate::GitCheckError::Failed { .. } => AppError::Io(e.to_string()),
         })?;
     }
     write_out(&bytes)
