@@ -56,16 +56,7 @@ fn context_line_stripped_of_its_trailing_space_still_applies() {
     );
 
     // All three changes stay addressable in the listing.
-    let listed = Command::cargo_bin("hunkpick")
-        .unwrap()
-        .args(["list", "--json"])
-        .write_stdin(stripped)
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let listed = String::from_utf8(listed).unwrap();
+    let listed = common::run_ok_text(&["list", "--json"], &stripped);
     assert_eq!(
         listed.matches("\"index\"").count(),
         3,

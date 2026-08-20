@@ -1,9 +1,8 @@
 use crate::model::*;
 use crate::renumber::{anchor, expected_new_start};
 use std::fmt;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// Which side of a hunk header a count belongs to.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -317,12 +316,7 @@ impl std::error::Error for GitCheckError {}
 /// Returns Err with git's verdict, or with the reason the check could not be made.
 pub fn validate_with_git(diff_bytes: &[u8], dir: &Path) -> Result<(), GitCheckError> {
     let mut cmd = Command::new("git");
-    cmd.arg("apply")
-        .arg("--check")
-        .current_dir(dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+    cmd.arg("apply").arg("--check").current_dir(dir);
     // `git apply --check` without `--index`/`--cached` reads the working tree of the current
     // directory, so these variables do not affect this call as it stands (verified against
     // git 2.53.0). They do decide the repository once the index is involved, and they arrive
@@ -332,32 +326,18 @@ pub fn validate_with_git(diff_bytes: &[u8], dir: &Path) -> Result<(), GitCheckEr
     // git's stderr below is decoded lossily and shown next to hunkpick's own ASCII-English
     // text; pinning the locale keeps it English and keeps its bytes UTF-8.
     crate::gitenv::pin_message_locale(&mut cmd);
-    let mut child = cmd.spawn().map_err(|source| GitCheckError::Spawn {
-        source,
-        dir: dir.to_path_buf(),
-    })?;
-    // Feed stdin from a separate thread while this one drains stdout/stderr. Writing the whole
-    // diff first would deadlock if git filled its stderr pipe (typically 64 KiB) before reading
-    // the patch to the end — plausible on a large diff that git rejects hunk by hunk.
-    let mut stdin = child.stdin.take().expect("stdin was configured as piped");
-    let writer = std::thread::scope(|scope| {
-        let handle = scope.spawn(move || stdin.write_all(diff_bytes));
-        let output = child.wait_with_output();
-        // Both sides are joined here: the writer cannot outlive the scope, so nothing is left
-        // running once this returns.
-        (handle.join(), output)
-    });
-    let (write_result, output) = writer;
-    match write_result {
-        // A closed pipe means git stopped reading (it rejected the patch early); its exit
-        // status and stderr below carry the real diagnosis, so this is not the error to report.
-        Ok(Err(e)) if e.kind() != std::io::ErrorKind::BrokenPipe => {
-            return Err(GitCheckError::Io(e));
+    // The diff is written from a separate thread while the pipes are drained; the reasoning and
+    // the one copy of it live in `gitenv::feed_and_wait`.
+    let output = crate::gitenv::feed_and_wait(&mut cmd, diff_bytes).map_err(|e| match e {
+        crate::gitenv::FeedError::Spawn(source) => GitCheckError::Spawn {
+            source,
+            dir: dir.to_path_buf(),
+        },
+        crate::gitenv::FeedError::Write(e) | crate::gitenv::FeedError::Wait(e) => {
+            GitCheckError::Io(e)
         }
-        Err(_) => return Err(GitCheckError::WriterPanicked),
-        _ => {}
-    }
-    let output = output.map_err(GitCheckError::Io)?;
+        crate::gitenv::FeedError::WriterPanicked => GitCheckError::WriterPanicked,
+    })?;
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     match output.status.code() {
         Some(0) => Ok(()),

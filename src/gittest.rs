@@ -5,20 +5,15 @@
 //! how a temporary repository is built, and the isolation from the developer's own git
 //! configuration is applied in one place.
 
-use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
-/// A `git` invocation in `dir`, insulated from the ambient git configuration.
-///
-/// The global and system configuration files are pointed at paths that do not exist (git reads
-/// a missing file as empty), and the repository-locating variables are dropped, so a developer's
-/// own settings cannot change what a test sees.
+/// A `git` invocation in `dir`, insulated from the ambient git configuration: neither the
+/// developer's settings nor the variables that point git at another repository reach it.
 fn git(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(dir);
-    cmd.env("GIT_CONFIG_GLOBAL", dir.join("absent-global-gitconfig"));
-    cmd.env("GIT_CONFIG_SYSTEM", dir.join("absent-system-gitconfig"));
+    crate::gitenv::insulate_config(&mut cmd, dir);
     crate::gitenv::insulate_repo_location(&mut cmd);
     cmd
 }
@@ -34,25 +29,19 @@ pub(crate) fn repo_with_file(content: &str) -> tempfile::TempDir {
 
 /// True if `diff_bytes` applies to the working tree in `dir` (`git apply --check`).
 ///
-/// Feeds stdin from a separate thread, as [`crate::validate::validate_with_git`] does: writing
-/// the whole diff before waiting deadlocks once git fills its stderr pipe, and a rejected diff
-/// is precisely what this helper is asked about.
+/// Runs through [`crate::gitenv::feed_and_wait`], as [`crate::validate::validate_with_git`]
+/// does: a rejected diff is precisely what this helper is asked about, and git reports such a
+/// diff line by line while it is still arriving.
 pub(crate) fn apply_check(diff_bytes: &[u8], dir: &Path) -> bool {
-    let mut child = git(dir)
-        .arg("apply")
-        .arg("--check")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().expect("stdin was configured as piped");
-    std::thread::scope(|scope| {
-        scope.spawn(move || stdin.write_all(diff_bytes));
-        child.wait_with_output().unwrap()
-    })
-    .status
-    .success()
+    let mut cmd = git(dir);
+    cmd.arg("apply").arg("--check");
+    // An environment failure — a full disk, a git that will not start — is not the answer this
+    // helper was asked for, and reporting it as "the diff does not apply" would send the reader
+    // of a failing test after the diff.
+    crate::gitenv::feed_and_wait(&mut cmd, diff_bytes)
+        .unwrap_or_else(|e| panic!("git apply --check in {}: {e}", dir.display()))
+        .status
+        .success()
 }
 
 /// True if `diff_bytes` applies to a file `f` seeded with `content` in a fresh repository.

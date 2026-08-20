@@ -3,51 +3,30 @@
 #![allow(dead_code)]
 
 use assert_cmd::Command as Cli;
-use std::io::Write;
-use std::process::{Command as Sys, Stdio};
+use std::process::Command as Sys;
 use tempfile::TempDir;
 
-/// A `git` invocation in `dir`, insulated from the ambient git configuration.
-///
-/// The global and system configuration files are pointed at paths that do not exist (git reads
-/// a missing file as empty) and the repository-locating variables are dropped, so a developer's
-/// own settings — `diff.noprefix`, `core.autocrlf`, `diff.mnemonicPrefix` and the like — cannot
-/// change the diffs these tests assert on.
+/// A `git` invocation in `dir`, insulated from the ambient git configuration: a developer's
+/// settings — `diff.noprefix`, `core.autocrlf`, `diff.mnemonicPrefix` and the like — must not
+/// change the diffs these tests assert on, and the repository-locating variables must not point
+/// git at another tree. Both lists come from the crate, so the tests insulate exactly what the
+/// tool does.
 pub fn git(dir: &TempDir) -> Sys {
     let mut cmd = Sys::new("git");
     cmd.current_dir(dir.path());
-    cmd.env(
-        "GIT_CONFIG_GLOBAL",
-        dir.path().join("absent-global-gitconfig"),
-    );
-    cmd.env(
-        "GIT_CONFIG_SYSTEM",
-        dir.path().join("absent-system-gitconfig"),
-    );
-    // The list itself comes from the crate, so the tests insulate exactly what the tool does.
+    hunkpick::gitenv::insulate_config(&mut cmd, dir.path());
     hunkpick::gitenv::insulate_repo_location(&mut cmd);
     cmd
 }
 
-/// Run `git` in `dir` with `args`, feeding `stdin_bytes` on stdin, and return the child's
-/// status. Feeding from a separate thread mirrors `validate::validate_with_git`: writing the
-/// whole diff before waiting deadlocks once git fills its stderr pipe, and a diff big enough
-/// for that is exactly what these tests generate.
+/// Run `git` in `dir` with `args`, feeding `stdin_bytes` on stdin, and return its output.
+/// The feeding is `gitenv::feed_and_wait`, the same one the tool itself uses: these tests
+/// generate diffs large enough for git to fill a pipe before the input ends.
 pub fn git_with_stdin(dir: &TempDir, args: &[&str], stdin_bytes: &[u8]) -> std::process::Output {
-    let mut child = git(dir)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().expect("stdin was configured as piped");
-    std::thread::scope(|scope| {
-        // A closed pipe means git stopped reading early; its status and stderr carry the
-        // diagnosis, so the write error is not what the caller should see.
-        scope.spawn(move || stdin.write_all(stdin_bytes));
-        child.wait_with_output().unwrap()
-    })
+    let mut cmd = git(dir);
+    cmd.args(args);
+    hunkpick::gitenv::feed_and_wait(&mut cmd, stdin_bytes)
+        .unwrap_or_else(|e| panic!("git {args:?} in {}: {e}", dir.path().display()))
 }
 
 /// Initialise a git repo in a temp directory with the given files committed.
@@ -140,6 +119,12 @@ pub fn run_ok(args: &[&str], stdin: &str) -> Vec<u8> {
         .get_output()
         .stdout
         .clone()
+}
+
+/// The `list --json` listing of `diff`, parsed. Every caller that reads the listing needs both
+/// halves of this — run the binary, parse its stdout — and none of them needs anything else.
+pub fn list_json(diff: &str) -> serde_json::Value {
+    serde_json::from_slice(&run_ok(&["list", "--json"], diff)).unwrap()
 }
 
 /// Like [`run_ok`], for the common case of a textual result.

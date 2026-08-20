@@ -49,20 +49,10 @@ fn rename_is_preserved() {
         assert!(!text.is_empty());
 
         // list --json must also succeed.
-        Command::cargo_bin("hunkpick")
-            .unwrap()
-            .args(["list", "--json"])
-            .write_stdin(diff)
-            .assert()
-            .success();
+        common::run_ok(&["list", "--json"], &diff);
     } else {
         // Rename detection not available in this environment: weaken to exit-0.
-        Command::cargo_bin("hunkpick")
-            .unwrap()
-            .args(["list", "--json"])
-            .write_stdin(diff.clone())
-            .assert()
-            .success();
+        common::run_ok(&["list", "--json"], &diff);
         Command::cargo_bin("hunkpick")
             .unwrap()
             .args(["select", "1"])
@@ -229,18 +219,7 @@ fn binary_file() {
         "diff must contain 'Binary files': {diff}"
     );
 
-    let json_output = Command::cargo_bin("hunkpick")
-        .unwrap()
-        .args(["list", "--json"])
-        .write_stdin(diff.clone())
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let json: serde_json::Value =
-        serde_json::from_slice(&json_output).expect("list --json must produce valid JSON");
+    let json = common::list_json(&diff);
     let files = json.as_array().expect("top-level must be array");
     assert_eq!(files.len(), 1);
     assert_eq!(

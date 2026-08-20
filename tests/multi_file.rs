@@ -5,14 +5,12 @@
 mod common;
 
 use assert_cmd::Command;
-use common::run_ok;
 use predicates::prelude::*;
 use serde_json::Value;
 
 /// Content id of the sub-hunk at `path:index` (1-based) from `list --json`.
 fn id_of(diff: &str, path: &str, index: u64) -> String {
-    let out = run_ok(&["list", "--json"], diff);
-    let v: Value = serde_json::from_slice(&out).unwrap();
+    let v: Value = common::list_json(diff);
     for f in v.as_array().unwrap() {
         if f["path"].as_str() == Some(path) {
             for h in f["hunks"].as_array().unwrap() {

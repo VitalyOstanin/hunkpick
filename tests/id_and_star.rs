@@ -10,8 +10,7 @@ use serde_json::Value;
 
 /// Sub-hunk ids across all files, in `list` order.
 fn ids(diff: &str) -> Vec<String> {
-    let out = run_ok(&["list", "--json"], diff);
-    let v: Value = serde_json::from_slice(&out).unwrap();
+    let v: Value = common::list_json(diff);
     v.as_array()
         .unwrap()
         .iter()

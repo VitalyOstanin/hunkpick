@@ -128,17 +128,7 @@ fn case_diff(dir: &TempDir, seed: u64) -> String {
 
 /// The number of sub-hunks hunkpick reports for `diff`.
 fn sub_hunk_count(diff: &str) -> usize {
-    let out = Command::cargo_bin("hunkpick")
-        .unwrap()
-        .args(["list", "--json"])
-        .write_stdin(diff.to_string())
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
-    json.as_array().unwrap()[0]["hunks"]
+    common::list_json(diff).as_array().unwrap()[0]["hunks"]
         .as_array()
         .unwrap()
         .len()
@@ -378,17 +368,8 @@ fn a_multi_file_diff_with_a_binary_and_a_non_ascii_path_round_trips() {
 
 /// The paths `list --json` reports for `diff`, in order.
 fn listed_paths(diff: &str) -> Vec<String> {
-    let out = Command::cargo_bin("hunkpick")
-        .unwrap()
-        .args(["list", "--json"])
-        .write_stdin(diff.to_string())
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
-    json.as_array()
+    common::list_json(diff)
+        .as_array()
         .unwrap()
         .iter()
         .map(|f| f["path"].as_str().unwrap().to_string())
@@ -441,16 +422,7 @@ fn interior_context_lines(diff: &str) -> Vec<u32> {
 
 /// The changed-line indices of the first sub-hunk that has more than one, via `list --json`.
 fn first_multi_line_sub_hunk(diff: &str) -> Option<(usize, Vec<usize>)> {
-    let out = Command::cargo_bin("hunkpick")
-        .unwrap()
-        .args(["list", "--json"])
-        .write_stdin(diff.to_string())
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let json = common::list_json(diff);
     for hunk in json.as_array()?[0]["hunks"].as_array()? {
         let lines: Vec<usize> = hunk["changed_lines"]
             .as_array()?

@@ -107,6 +107,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   console on cp866 or cp1251 shows it as mojibake in the middle of the sentence. The guard added
   alongside it covered the help texts only, so the character came back in an error message the
   same week; it now covers every string literal of `src/` outside the test modules.
+- One copy of the plumbing that runs `git` with a diff on its stdin. `gitenv::feed_and_wait`
+  replaces three near-identical blocks — the result-diff check and two test helpers, two of them
+  added last cycle — that had already drifted apart in how they treat a failed write. It also
+  closes the failure path they shared: the child is now kept in hand and killed if waiting on it
+  fails, because `std::thread::scope` parks until every thread it started has finished, and the
+  writing thread can be blocked in a `write` nobody is going to read. The failure
+  was a hang rather than a diagnostic, and the fallback test command documented in CONTRIBUTING
+  has no per-test timeout. The stub file names that keep a developer's git configuration out of
+  the test repositories moved to `gitenv::insulate_config`, next to the list of variables that
+  was consolidated there last cycle, and `tests/git_config_isolation.rs` now poisons
+  `GIT_CONFIG_SYSTEM` as well as `GIT_CONFIG_GLOBAL`, so dropping either one turns the suite red.
 
 ### Changed
 
@@ -122,6 +133,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the new `SplitError::NotATextEntry` and `SplitError::OutOfBounds`. The CLI resolves addresses
   before it splits, so this only concerns a direct library caller; adding the two variants is a
   breaking change for a caller that matches `SplitError` exhaustively.
+- **Library API.** `gitenv` gained `feed_and_wait`, `FeedError`, `insulate_config` and the two
+  file-name constants it uses. Additions only; nothing existing changed shape.
 - **Library API.** `validate::GitCheckError::Spawn` carries the working directory alongside the
   `io::Error` (`Spawn { source, dir }` instead of `Spawn(io::Error)`), and the new variant
   `Failed { code, stderr }` reports a git that never reached a verdict. Both are breaking changes

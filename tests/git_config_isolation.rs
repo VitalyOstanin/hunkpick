@@ -17,11 +17,12 @@ mod common;
 /// The name libtest knows the scenario by, used to select it in the child run.
 const SCENARIO: &str = "poisoned_global_config_scenario";
 
-/// The scenario: with `GIT_CONFIG_GLOBAL` pointing at a hostile configuration, the helpers must
+/// The scenario: with `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` pointing at a hostile
+/// configuration, the helpers must
 /// still produce the diff a clean machine produces. Ignored by default — on its own, with no
 /// poisoned variable in the environment, it asserts nothing of interest.
 #[test]
-#[ignore = "run by ambient_global_git_config_does_not_reach_the_test_repositories"]
+#[ignore = "run by ambient_git_config_does_not_reach_the_test_repositories"]
 fn poisoned_global_config_scenario() {
     let dir = common::repo_with(&[("f", "a\nb\nc\n")]);
     let diff = common::diff_after(&dir, &[("f", "a\nB\nc\n")]);
@@ -36,10 +37,12 @@ fn poisoned_global_config_scenario() {
     );
 }
 
-/// Write a hostile global git configuration, then run the scenario above in a child process that
-/// inherits it.
+/// Write a hostile git configuration, then run the scenario above in a child process that
+/// inherits it through both variables git reads a configuration file from. Poisoning only the
+/// global one would leave the system one — the second half of the isolation the helpers apply —
+/// unproven, and a helper that dropped it would still pass.
 #[test]
-fn ambient_global_git_config_does_not_reach_the_test_repositories() {
+fn ambient_git_config_does_not_reach_the_test_repositories() {
     let cfg = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(
         cfg.path(),
@@ -51,13 +54,14 @@ fn ambient_global_git_config_does_not_reach_the_test_repositories() {
     let out = std::process::Command::new(exe)
         .args(["--exact", "--ignored", "--test-threads", "1", SCENARIO])
         .env("GIT_CONFIG_GLOBAL", cfg.path())
+        .env("GIT_CONFIG_SYSTEM", cfg.path())
         .output()
         .expect("re-running this test binary");
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
-        "the scenario failed under a poisoned GIT_CONFIG_GLOBAL:\n{stdout}{}",
+        "the scenario failed under a poisoned git configuration:\n{stdout}{}",
         String::from_utf8_lossy(&out.stderr)
     );
     // A filter that matches nothing also exits 0, which would make this test vacuous.
