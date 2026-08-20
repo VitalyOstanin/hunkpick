@@ -50,15 +50,66 @@ const DEFAULT_STAGING_CASES: u64 = 40;
 #[cfg(windows)]
 const DEFAULT_STAGING_CASES: u64 = 8;
 
-/// The case count for this run: `HUNKPICK_DIFF_CASES` if it parses as a positive number, the
-/// platform default otherwise. An unusable value is ignored rather than failing the test — the
-/// counts are a knob, not part of what is under test.
+/// The largest count this knob accepts. A run that big is not a soak, it is a typo: at the
+/// measured rate the slowest test would take days, and nextest would kill it long before. The
+/// bound is also what keeps the proportion in [`staging_cases`] out of overflow.
+const MAX_CASES: u64 = 1_000_000;
+
+/// The case count for this run: `HUNKPICK_DIFF_CASES` if it parses as a positive number within
+/// [`MAX_CASES`], the platform default otherwise. An unusable value falls back rather than
+/// failing the test — the counts are a knob, not part of what is under test — but it says so on
+/// stderr, because a silent fallback makes `HUNKPICK_DIFF_CASES=2OOO` (letters for zeros) look
+/// exactly like a soak that ran.
 fn cases() -> u64 {
-    std::env::var("HUNKPICK_DIFF_CASES")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_CASES)
+    let Ok(raw) = std::env::var("HUNKPICK_DIFF_CASES") else {
+        return DEFAULT_CASES;
+    };
+    usable_count(&raw).unwrap_or_else(|| {
+        eprintln!(
+            "HUNKPICK_DIFF_CASES={raw:?} is not a number between 1 and {MAX_CASES}; \
+             running {DEFAULT_CASES} cases"
+        );
+        DEFAULT_CASES
+    })
+}
+
+/// The count `raw` asks for, or `None` when it asks for something unusable. Split out of
+/// [`cases`] so the rule can be checked without an environment variable — setting one in-process
+/// is `unsafe` in this edition, and the tests run in threads.
+fn usable_count(raw: &str) -> Option<u64> {
+    match raw.parse::<u64>() {
+        Ok(n) if (1..=MAX_CASES).contains(&n) => Some(n),
+        _ => None,
+    }
+}
+
+/// Every shape of unusable value falls back rather than being taken at face value: a typo with
+/// letters for zeros, a thousands separator, a trailing space, a negative, zero, and a number
+/// past the bound — the last of which used to panic inside `staging_cases` with "attempt to
+/// multiply with overflow", a message about the test's own arithmetic rather than about the
+/// variable that caused it.
+#[test]
+fn the_case_count_knob_refuses_what_it_cannot_run() {
+    for raw in [
+        "2OOO",
+        "2_000",
+        "2000 ",
+        "-1",
+        "0",
+        "",
+        "18446744073709551615",
+    ] {
+        assert_eq!(
+            usable_count(raw),
+            None,
+            "{raw:?} must not be taken as a count"
+        );
+    }
+    assert_eq!(usable_count("2000"), Some(2000));
+    assert_eq!(usable_count("1"), Some(1));
+    assert_eq!(usable_count(&MAX_CASES.to_string()), Some(MAX_CASES));
+    // The bound is what keeps the proportion below from overflowing.
+    assert!(MAX_CASES.checked_mul(DEFAULT_STAGING_CASES).is_some());
 }
 
 /// The staging-loop count, kept in the same proportion to [`cases`] as the defaults are.

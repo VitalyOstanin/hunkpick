@@ -178,6 +178,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   widest here is 252 columns, and the README links by full URL because it is also the crates.io
   page — as is the one-line `description` in `Cargo.toml`.
 
+- `HUNKPICK_DIFF_CASES`, the knob for how many generated cases the differential tests run, no
+  longer accepts what it cannot do. A value that does not parse was replaced by the default in
+  silence, so `HUNKPICK_DIFF_CASES=2OOO` (letters for zeros) produced a run indistinguishable
+  from the soak it was meant to be; it now says so on stderr. A value past `u64::MAX / 40`
+  panicked inside the test's own arithmetic with "attempt to multiply with overflow", a message
+  about the wrong thing entirely; the knob is bounded at a million, which no run could finish
+  anyway.
+
 ### Changed
 
 - A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being
