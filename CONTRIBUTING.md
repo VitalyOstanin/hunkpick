@@ -9,6 +9,7 @@ the project, run the checks, and submit changes.
 - [Development loop](#development-loop)
 - [Generated tests](#generated-tests)
 - [Releases](#releases)
+- [Branch protection](#branch-protection)
 - [Pull requests](#pull-requests)
 - [Commit messages](#commit-messages)
 - [Reporting issues](#reporting-issues)
@@ -155,6 +156,18 @@ keeps its corpus between runs.
 
 Cutting a release is described in [`RELEASING.md`](RELEASING.md): what the pipeline checks,
 how to prepare the release commit, and how to rehearse it with a dry run.
+
+## Branch protection
+
+`master` is not protected, and changes land on it by direct push. That is deliberate for a
+single-maintainer project: a required-status gate would put a pull request and a wait in front of
+every change without adding a reviewer. The consequence is equally deliberate — CI is a signal,
+not a gate. A run can go red on a commit that is already in the branch, and did: a test that
+built a command line too long for Windows failed after the push, not before it.
+
+So the rule that replaces the gate is: a red run on `master` is fixed by the next commit, not by
+the next batch of work. GitHub notifies the author of the push by default; that notification is
+the whole mechanism.
 
 ## Pull requests
 

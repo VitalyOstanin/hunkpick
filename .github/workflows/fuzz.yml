@@ -22,8 +22,12 @@ permissions:
   contents: read
 
 concurrency:
+  # Not `cancel-in-progress`: a manual dispatch would otherwise kill a scheduled search that may
+  # be an hour in. The corpus is saved either way (`if: always()` below), but the search itself
+  # restarts from the beginning, and the twice-weekly cadence exists so the corpus survives
+  # GitHub's 7-day cache eviction. Two searches queueing is the cheaper outcome.
   group: fuzz-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   fuzz:
@@ -67,6 +71,14 @@ jobs:
           esac
           if [ "$MINUTES" -lt 1 ]; then
             echo "::error::minutes must be at least 1, got '$MINUTES'"
+            exit 1
+          fi
+          # Upper bound, tied to `timeout-minutes: 90` on the job. A larger budget does not buy
+          # a longer search: the job is killed at 90 minutes, and the run then reads as a
+          # failure rather than as a finished search. The margin covers the toolchain install,
+          # the build and the corpus restore/save around the search itself.
+          if [ "$MINUTES" -gt 80 ]; then
+            echo "::error::minutes must be at most 80 (the job is killed at 90), got '$MINUTES'"
             exit 1
           fi
           # The corpus directory does not exist on the first run: it is gitignored, so the

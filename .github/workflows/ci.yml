@@ -24,6 +24,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: ./.github/actions/cargo-fetch-retry
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Clippy
@@ -66,6 +67,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # A flaky crates.io download fails the run otherwise, and cargo's own net.retry does not
+      # classify every such failure as spurious. The release workflow has used this since it
+      # was written; these jobs run on every push, which is where a manual re-run costs most.
+      - uses: ./.github/actions/cargo-fetch-retry
       # Prebuilt nextest binary (no compile, no Rust-version bump): the
       # .config/nextest.toml profile enforces a per-test timeout and bounded
       # parallelism that `cargo test` cannot express.
@@ -106,6 +111,7 @@ jobs:
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: ./.github/actions/cargo-fetch-retry
       - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
         with:
           tool: cargo-llvm-cov@0.9.0,cargo-nextest@0.9.143
@@ -140,6 +146,7 @@ jobs:
         run: echo "RUSTUP_TOOLCHAIN=1.85.0" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@bc540ba06a4ccee415bb241490e0b25ee8e7d315 # 1.85.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: ./.github/actions/cargo-fetch-retry
       # `--locked` as in the release workflow: the MSRV gate must be checked against the
       # dependency versions the project actually ships, not whatever resolves today.
       # `--all-targets` reaches the dev-dependencies as well: the `proptest = "~1.11"` pin
@@ -160,6 +167,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: ./.github/actions/cargo-fetch-retry
       - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
         with:
           tool: cargo-semver-checks@0.50.0
@@ -178,6 +186,12 @@ jobs:
     # the installed nightly is whatever shipped today. A regression in nightly, libfuzzer-sys or
     # cargo-fuzz would otherwise turn every pull request red for a reason outside the change —
     # so the signal stays visible in the run, but does not gate the merge.
+    #
+    # What that leaves ungated is only the nightly build. The deterministic half — every
+    # committed seed still reaching the code its target exercises, and the library still
+    # accepting it — is `tests/fuzz_seeds.rs`, which runs on stable in the blocking `test` job.
+    # Replaying the seeds here with `-runs=0` would add nothing but another dependency on
+    # whatever nightly shipped today.
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

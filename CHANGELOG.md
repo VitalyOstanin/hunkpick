@@ -161,6 +161,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verdict. And a property-test counterexample found in CI is uploaded as an artifact, the way a
   fuzzer crash already was: the seed lives only on the runner, and a re-run draws a new one.
 
+- CI jobs fetch dependencies through the retry action the release workflow has always used. A
+  flaky crates.io download — the `curl 55` class that cargo's own `net.retry` does not treat as
+  spurious — failed a push run and needed a manual re-run, while the workflow that runs a few
+  times a month was protected and the one that runs on every push was not.
+- The fuzz search accepts a budget it can finish. `minutes` had no upper bound while the job is
+  killed at 90, so a larger value ended the run as a failure rather than as a completed search;
+  it is now capped at 80. A manual dispatch also no longer cancels a scheduled search in
+  progress: the corpus survives either way, but the search itself restarted from nothing.
+
 ### Changed
 
 - A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being
