@@ -6,8 +6,11 @@ it found.
 
 Each file is a small diff covering one shape the parser has to handle — a plain replacement, two
 change blocks in one hunk, CRLF endings, a missing final newline, a mail preamble, a rename, a
-binary patch, several files, a file deletion, lines after the last hunk. The `selectors` target
-reads a diff, a NUL byte and then one selector per line, so its seeds carry both halves.
+binary patch, several files, a file deletion, lines after the last hunk. Three of them carry
+bytes above ASCII, for the branches only those reach: a path in git's quoted form with octal
+escapes, content that is not valid UTF-8, and a UTF-8 byte-order mark in the preamble. The
+`selectors` target reads a diff, a NUL byte and then one selector per line, so its seeds carry
+both halves; one addresses a quoted path by its decoded bytes.
 
 Passed on the command line alongside the corpus directory:
 

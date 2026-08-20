@@ -290,6 +290,9 @@ pub fn validate_with_git(diff_bytes: &[u8], dir: &Path) -> Result<(), GitCheckEr
     // set from hooks, `git rebase --exec` and editor integrations — dropping them keeps
     // `-C DIR` the only thing that selects the repository whatever flags are added later.
     crate::gitenv::insulate_repo_location(&mut cmd);
+    // git's stderr below is decoded lossily and shown next to hunkpick's own ASCII-English
+    // text; pinning the locale keeps it English and keeps its bytes UTF-8.
+    crate::gitenv::pin_message_locale(&mut cmd);
     let mut child = cmd.spawn().map_err(GitCheckError::Spawn)?;
     // Feed stdin from a separate thread while this one drains stdout/stderr. Writing the whole
     // diff first would deadlock if git filled its stderr pipe (typically 64 KiB) before reading

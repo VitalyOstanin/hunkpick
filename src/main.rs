@@ -178,6 +178,53 @@ fn utf16_or_32_bom(input: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// How many opening bytes are examined when looking for UTF-16 that carries no byte-order mark.
+/// A diff opens with an ASCII marker line, so the pattern shows up at once; testing the whole
+/// input instead would misjudge a diff whose later content is not ASCII.
+const UTF16_SNIFF_BYTES: usize = 256;
+
+/// Whether the input has a line that opens a diff. Shared by the non-diff guard and by the
+/// UTF-16 sniffer, so both agree on what counts as a diff.
+fn has_diff_marker(input: &[u8]) -> bool {
+    const MARKERS: [&[u8]; 5] = [b"diff --git ", b"--- ", b"+++ ", b"@@ ", b"Binary files "];
+    // A combined diff counts as a marker here so the parser gets to reject it by name. Its
+    // `---`/`+++` pair is omitted for a file resolved the same way in both parents, and without
+    // this the guard would report "no diff markers found" — which points at the pipe rather
+    // than at the format.
+    input.split(|&b| b == b'\n').any(|line| {
+        MARKERS.iter().any(|m| line.starts_with(m)) || hunkpick::parser::is_combined_marker(line)
+    })
+}
+
+/// The encoding of a UTF-16 stream that carries no byte-order mark, when the input looks like
+/// one: every other opening byte is NUL and the rest spell ASCII text with a diff marker.
+/// `iconv -t UTF-16LE` and `UnicodeEncoding($false, $false)` write exactly that, and without
+/// this the NUL guard would call such a diff binary input and send the reader looking for a
+/// binary file instead of at the encoding of their own patch.
+fn utf16_without_bom(input: &[u8]) -> Option<&'static str> {
+    // Truncated to a whole number of code units; four of them is the least that distinguishes
+    // UTF-16 from a short run of NUL bytes in genuinely binary data.
+    let len = input.len().min(UTF16_SNIFF_BYTES) & !1;
+    if len < 8 {
+        return None;
+    }
+    let head = &input[..len];
+    for (encoding, text_at) in [("UTF-16LE", 0usize), ("UTF-16BE", 1usize)] {
+        let nul_at = 1 - text_at;
+        if !head.iter().skip(nul_at).step_by(2).all(|&b| b == 0) {
+            continue;
+        }
+        let text: Vec<u8> = head.iter().skip(text_at).step_by(2).copied().collect();
+        let is_ascii_text = text
+            .iter()
+            .all(|&b| matches!(b, b'\t' | b'\n' | b'\r' | 0x20..=0x7E));
+        if is_ascii_text && has_diff_marker(&text) {
+            return Some(encoding);
+        }
+    }
+    None
+}
+
 /// Reject input that is clearly not a unified diff: text in an encoding hunkpick does not read,
 /// binary data (a NUL byte), or text that has no diff marker line at all. Empty / whitespace
 /// input is handled by the caller.
@@ -193,20 +240,21 @@ fn reject_non_diff(input: &[u8]) -> Result<(), AppError> {
              UTF-8`"
         )));
     }
+    // Also checked before the NUL guard, and for the same reason as the mark above: a UTF-16
+    // diff written without one is still a diff with an encoding problem, not binary data.
+    if let Some(encoding) = utf16_without_bom(input) {
+        return Err(AppError::Usage(format!(
+            "input looks like {encoding} without a byte-order mark; hunkpick reads a UTF-8 (or \
+             any ASCII-compatible) byte stream — re-encode the diff, e.g. `iconv -f {encoding} \
+             -t UTF-8`"
+        )));
+    }
     if input.contains(&0) {
         return Err(AppError::Usage(
             "binary input: NUL byte found, expected a unified diff".into(),
         ));
     }
-    const MARKERS: [&[u8]; 5] = [b"diff --git ", b"--- ", b"+++ ", b"@@ ", b"Binary files "];
-    // A combined diff counts as a marker here so the parser gets to reject it by name. Its
-    // `---`/`+++` pair is omitted for a file resolved the same way in both parents, and without
-    // this the guard would report "no diff markers found" — which points at the pipe rather
-    // than at the format.
-    let has_marker = input.split(|&b| b == b'\n').any(|line| {
-        MARKERS.iter().any(|m| line.starts_with(m)) || hunkpick::parser::is_combined_marker(line)
-    });
-    if !has_marker {
+    if !has_diff_marker(input) {
         return Err(AppError::Usage(
             "input does not look like a unified diff (no diff markers found)".into(),
         ));

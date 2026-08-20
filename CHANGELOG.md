@@ -24,6 +24,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A hunk header whose ranges were separated by something other than one ASCII space — a tab, two
+  spaces, or a non-ASCII whitespace character such as U+00A0 — parsed, and the header was then
+  rebuilt on the way out with a plain space. A diff git calls a corrupt patch came back out as
+  one git accepts, at exit 0. Such a header is now refused as malformed (exit 2), the same as any
+  other header hunkpick cannot reproduce byte for byte.
+
+### Changed
+
+- A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being
+  reported as binary input. `iconv -t UTF-16LE` and `UnicodeEncoding($false, $false)` write such
+  a stream, and "binary input: NUL byte found" sent the reader looking for a binary file in the
+  pipeline rather than at the encoding of their own patch. The diff is still not re-encoded
+  (ADR 0005) — the message says what to run.
+- `git apply --check`, run for `--verify-result-diff-git`, now runs in the C locale. Its stderr
+  is shown next to hunkpick's own ASCII-English text, so an inherited locale used to put another
+  language — or U+FFFD, where the bytes were not UTF-8 — in front of the user.
+- The fuzzing dictionary and the committed seed corpus now carry bytes above ASCII: a path in
+  git's quoted form with octal escapes, content that is not valid UTF-8, and the byte-order
+  marks the input guard names. The header defect above was reachable only through such bytes and
+  had survived fuzzing.
+
 ## [0.8.1] - 2026-08-18
 
 ### Fixed

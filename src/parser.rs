@@ -446,7 +446,13 @@ fn parse_hunk_header(line: &[u8]) -> Result<Hunk, ParseError> {
     let section = after.strip_prefix(b" ").unwrap_or(after).to_vec();
     // The ranges portion (`-os,ol +ns,nl`) is ASCII for any valid hunk header.
     let ranges = std::str::from_utf8(ranges).map_err(|_| bad())?;
-    let mut it = ranges.split_whitespace();
+    // Split on the one ASCII space the format prescribes, not on `char::is_whitespace`:
+    // `split_whitespace` also cuts on tabs and on non-ASCII code points such as U+00A0, and
+    // `emit` rebuilds the header with a plain space — the separator bytes would be dropped on
+    // the way out, a silent rewrite of the input at exit 0 (the same reason a third token is
+    // refused below). git calls such a header a corrupt patch; hunkpick must not launder it
+    // into one git accepts.
+    let mut it = ranges.split(' ');
     let old = it.next().ok_or_else(bad)?;
     let new = it.next().ok_or_else(bad)?;
     // A third token is not a header hunkpick can represent. Ignoring it parsed the line as if
@@ -894,6 +900,45 @@ rename to new
         let p = parse(src.as_bytes()).unwrap();
         assert_eq!(p.files[0].old_path.as_deref(), Some(b"old".as_slice()));
         assert_eq!(p.files[0].new_path.as_deref(), Some(b"new".as_slice()));
+    }
+
+    #[test]
+    fn a_non_ascii_space_between_the_ranges_is_rejected() {
+        // `str::split_whitespace` cuts on every `White_Space` code point, so a header separated
+        // by one of them parsed, and `emit` then rebuilt the header from the parsed numbers with
+        // an ASCII space — the input rewritten on the way out, at exit 0. git rejects such a
+        // header outright (`corrupt patch`), so hunkpick must not turn it into one git accepts.
+        for sep in ["\u{a0}", "\u{85}", "\u{2008}", "\u{3000}"] {
+            let src = format!("--- a/f\n+++ b/f\n@@ -1,3{sep}+1,3 @@\n a\n-b\n+B\n c\n");
+            assert!(
+                matches!(parse(src.as_bytes()), Err(ParseError::BadHunkHeader(_))),
+                "separator {sep:?} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tab_or_a_double_space_between_the_ranges_is_rejected() {
+        // Same class as the non-ASCII separator: the exact bytes cannot be reproduced by `emit`,
+        // which always writes one space, so accepting them would rewrite the input silently.
+        for sep in ["\t", "  "] {
+            let src = format!("--- a/f\n+++ b/f\n@@ -1,3{sep}+1,3 @@\n a\n-b\n+B\n c\n");
+            assert!(
+                matches!(parse(src.as_bytes()), Err(ParseError::BadHunkHeader(_))),
+                "separator {sep:?} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn non_ascii_digits_in_a_range_are_rejected() {
+        // `str::parse::<u32>` takes ASCII digits only; lock that in so a future move to a
+        // hand-rolled parser cannot start accepting `١٢` and emitting `12`.
+        let src = "--- a/f\n+++ b/f\n@@ -\u{661},3 +1,3 @@\n a\n-b\n+B\n c\n";
+        assert!(matches!(
+            parse(src.as_bytes()),
+            Err(ParseError::BadHunkHeader(_))
+        ));
     }
 
     #[test]

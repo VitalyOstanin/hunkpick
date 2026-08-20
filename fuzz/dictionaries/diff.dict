@@ -37,6 +37,19 @@ binary_git="GIT binary patch"
 binary_literal="literal "
 binary_delta="delta "
 
+# Encodings
+# The parser has branches that only non-ASCII bytes reach: octal escapes inside a git-quoted
+# path, a selector whose bytes are not valid UTF-8, the lossy path rendering of `list`, and the
+# byte-order marks the input guard names. Without these tokens the fuzzer has to invent the
+# high bytes itself, and a defect in the header parser caused by one of them went unfound.
+quoted_path="\"a/\\303\\251.txt\""
+octal_escape="\\303\\251"
+raw_byte="\xff"
+bom_utf8="\xef\xbb\xbf"
+bom_utf16le="\xff\xfe"
+bom_utf16be="\xfe\xff"
+nbsp="\xc2\xa0"
+
 # Line endings and separators
 crlf="\x0d\x0a"
 mail_from="From: "
