@@ -311,7 +311,20 @@ impl fmt::Display for GitCheckError {
     }
 }
 
-impl std::error::Error for GitCheckError {}
+impl std::error::Error for GitCheckError {
+    /// The `io::Error` underneath, where there is one. This is the first error type in the crate
+    /// that wraps another, and a caller walking the chain — `anyhow`, a `{:?}` report — gets the
+    /// operating system's own answer instead of only this type's sentence about it.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            GitCheckError::Spawn { source, .. } => Some(source),
+            GitCheckError::Io(e) => Some(e),
+            GitCheckError::WriterPanicked | GitCheckError::Rejected(_) => None,
+            // git's own words are in the message; there is no error value behind them.
+            GitCheckError::Failed { .. } => None,
+        }
+    }
+}
 
 /// Run `git apply --check` against the working tree in `dir`, feeding `diff_bytes` on stdin.
 /// Returns Err with git's verdict, or with the reason the check could not be made.

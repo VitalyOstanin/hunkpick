@@ -200,6 +200,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the unused `rehearsal` output it advertised is gone: a value computed, documented and read by
   nobody sends a reader looking for the place it is used.
 
+- Code that clippy has no rule for. `emit_selection` had grown to 79 lines and kept "does the
+  result end on the line the input ended on" in a variable the loop overwrote once per file,
+  correct only because the last iteration wrote last — a `continue` added later would have left
+  it describing the wrong file, and nothing downstream checks that. Building one file entry is a
+  function now, and it returns the answer with the entry it belongs to; a test holds the property
+  across a multi-file diff. `resolve_hunk` parsed its index twice and built the string for its
+  error message on the success path as well. `GitCheckError` and `FeedError` implement
+  `Error::source`, so a caller walking the chain reaches the operating system's own answer. And
+  the `selectors` fuzz target drops its lossy non-Unix fallback: the targets are built for
+  `x86_64-unknown-linux-gnu`, and a fallback that changes the bytes fuzzes something other than
+  what the CLI passes in.
+
 ### Changed
 
 - A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being

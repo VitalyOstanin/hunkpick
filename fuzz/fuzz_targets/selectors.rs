@@ -57,6 +57,14 @@ fuzz_target!(|data: &[u8]| {
     hunkpick::validate::validate_input(&result).expect("a selection must be valid input");
 });
 
+/// Arbitrary bytes as one command-line argument, the way a Unix shell hands them over.
+///
+/// Unix only, and the target as a whole is: libFuzzer needs the sanitizer support of a nightly
+/// Linux toolchain, and both the CI build and the scheduled search name
+/// `x86_64-unknown-linux-gnu` explicitly. The other direction — `OsStr::as_encoded_bytes`, which
+/// `select::os_bytes` uses — is portable; this one is not, because arbitrary bytes are not a
+/// valid `OsString` everywhere. A lossy fallback would have quietly fuzzed something other than
+/// what the CLI passes in.
 #[cfg(unix)]
 fn os_string(bytes: &[u8]) -> OsString {
     use std::os::unix::ffi::OsStringExt;
@@ -64,9 +72,7 @@ fn os_string(bytes: &[u8]) -> OsString {
 }
 
 #[cfg(not(unix))]
-fn os_string(bytes: &[u8]) -> OsString {
-    OsString::from(String::from_utf8_lossy(bytes).into_owned())
-}
+compile_error!("the fuzz targets are built for x86_64-unknown-linux-gnu; see CONTRIBUTING.md");
 
 /// Recompute every hunk header's line counts from its body, leaving the start positions as the
 /// input had them. The mirror of what `validate_input` checks, applied instead of asserted.

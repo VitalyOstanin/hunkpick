@@ -686,74 +686,89 @@ fn emit_selection(
     subs_cache: &BTreeMap<usize, Vec<Hunk>>,
 ) -> Result<Patch, SelectError> {
     let mut files = Vec::new();
-    let mut last_fi = None;
-    // Whether the file emitted last ends on the same line its source did — see the flag at the
-    // end of this function. Set per file; only the value left by the last one matters.
-    let mut ends_on_the_files_last_line = false;
+    // The last file emitted, and whether it ends on the line its source ended on. Kept together
+    // with the index it belongs to rather than in a flag the loop overwrites: the value describes
+    // one file entry, and a later `continue` or reordering would leave a bare flag describing a
+    // different one, which nothing downstream could notice.
+    let mut last: Option<(usize, bool)> = None;
     for (fi, picks) in chosen {
-        last_fi = Some(fi);
-        let src = &patch.files[fi];
-        let content = match &src.content {
-            // A binary file has no sub-hunks; its picks vec is always empty. It is taken whole,
-            // so its last line is emitted.
-            FileContent::Binary(b) => {
-                ends_on_the_files_last_line = true;
-                FileContent::Binary(b.clone())
-            }
-            FileContent::Text(_) => {
-                reject_conflicting_line_set_picks(&picks)?;
-                // Ordered by sub-hunk index so emitted hunks follow old-file order. Distinct
-                // sub-hunks are disjoint, so no overlap check is needed, and a duplicate whole
-                // pick can no longer arrive: the accumulator holds those in a set.
-                let picks = picks.into_ordered();
-                let subs = &subs_cache[&fi];
-                // The file's last line is the last line of its last sub-hunk, and it survives
-                // only when that sub-hunk is taken whole — an `@L` cut may drop it.
-                ends_on_the_files_last_line =
-                    matches!(picks.last(), Some(Chosen::Whole(i)) if *i == subs.len());
-                let hunks = materialise_picks(subs, &picks)?;
-                reject_partial_selection_of_a_deleted_file(src, &hunks)?;
-                FileContent::Text(hunks)
-            }
-        };
-        // Only the file's tail (lines after its last hunk, e.g. the `-- \n<version>` signature
-        // of a format-patch) carries over: it keeps its meaning whichever sub-hunks were
-        // picked. Lines recorded between hunks have no defined place once hunks are dropped
-        // or split, so they are not emitted.
-        let src_hunks = src.hunk_count();
-        let out_hunks = content.hunk_count();
-        let trailer: Vec<_> = src
-            .trailer
-            .iter()
-            .filter(|(at, _)| *at == src_hunks)
-            .map(|(_, l)| (out_hunks, l.clone()))
-            .collect();
-        // A tail is emitted after the hunks and always carries over, so with one present the
-        // file ends on the line it ended on before, whichever sub-hunks were picked.
-        ends_on_the_files_last_line |= !trailer.is_empty();
-        files.push(FileDiff {
-            headers: src.headers.clone(),
-            trailer,
-            old_path: src.old_path.clone(),
-            new_path: src.new_path.clone(),
-            content,
-        });
+        let (file, ends_on_the_files_last_line) =
+            select_from_file(&patch.files[fi], fi, picks, subs_cache)?;
+        last = Some((fi, ends_on_the_files_last_line));
+        files.push(file);
     }
     // The preamble carries over with the files: a format-patch input stays a mail, head and
     // footer both. Its diffstat then describes the original commit rather than the selection —
     // the caller chose to filter a mail, and hunkpick does not rewrite prose.
+    //
     // The flag is about one line of the input — its last. It carries over only when the result
     // ends on that same line: the input's last file is also the result's last, and that file is
     // emitted down to its final line. Otherwise the result ends somewhere else, and dropping the
     // newline there would truncate a line nobody asked to change.
+    let last_of_the_input = patch.files.len().checked_sub(1);
     let ends_on_the_inputs_last_line = patch.no_trailing_newline
-        && last_fi == patch.files.len().checked_sub(1)
-        && ends_on_the_files_last_line;
+        && last.is_some_and(|(fi, ends_on_its_last_line)| {
+            Some(fi) == last_of_the_input && ends_on_its_last_line
+        });
     Ok(Patch {
         preamble: patch.preamble.clone(),
         files,
         no_trailing_newline: ends_on_the_inputs_last_line,
     })
+}
+
+/// One file entry of the result, and whether it ends on the line `src` ended on — the question
+/// [`emit_selection`] has to answer for the last file it emits, and can only answer here, where
+/// the picks and the tail of that file are both in hand.
+fn select_from_file(
+    src: &FileDiff,
+    fi: usize,
+    picks: FilePicks,
+    subs_cache: &BTreeMap<usize, Vec<Hunk>>,
+) -> Result<(FileDiff, bool), SelectError> {
+    let (content, mut ends_on_the_files_last_line) = match &src.content {
+        // A binary file has no sub-hunks; its picks vec is always empty. It is taken whole,
+        // so its last line is emitted.
+        FileContent::Binary(b) => (FileContent::Binary(b.clone()), true),
+        FileContent::Text(_) => {
+            reject_conflicting_line_set_picks(&picks)?;
+            // Ordered by sub-hunk index so emitted hunks follow old-file order. Distinct
+            // sub-hunks are disjoint, so no overlap check is needed, and a duplicate whole
+            // pick can no longer arrive: the accumulator holds those in a set.
+            let picks = picks.into_ordered();
+            let subs = &subs_cache[&fi];
+            // The file's last line is the last line of its last sub-hunk, and it survives
+            // only when that sub-hunk is taken whole — an `@L` cut may drop it.
+            let ends_on_the_files_last_line =
+                matches!(picks.last(), Some(Chosen::Whole(i)) if *i == subs.len());
+            let hunks = materialise_picks(subs, &picks)?;
+            reject_partial_selection_of_a_deleted_file(src, &hunks)?;
+            (FileContent::Text(hunks), ends_on_the_files_last_line)
+        }
+    };
+    // Only the file's tail (lines after its last hunk, e.g. the `-- \n<version>` signature
+    // of a format-patch) carries over: it keeps its meaning whichever sub-hunks were
+    // picked. Lines recorded between hunks have no defined place once hunks are dropped
+    // or split, so they are not emitted.
+    let src_hunks = src.hunk_count();
+    let out_hunks = content.hunk_count();
+    let trailer: Vec<_> = src
+        .trailer
+        .iter()
+        .filter(|(at, _)| *at == src_hunks)
+        .map(|(_, l)| (out_hunks, l.clone()))
+        .collect();
+    // A tail is emitted after the hunks and always carries over, so with one present the
+    // file ends on the line it ended on before, whichever sub-hunks were picked.
+    ends_on_the_files_last_line |= !trailer.is_empty();
+    let file = FileDiff {
+        headers: src.headers.clone(),
+        trailer,
+        old_path: src.old_path.clone(),
+        new_path: src.new_path.clone(),
+        content,
+    };
+    Ok((file, ends_on_the_files_last_line))
 }
 
 /// Resolve an `@<id>` selector: match every sub-hunk in the patch whose content hash equals
@@ -915,24 +930,32 @@ impl<'a> PathIndex<'a> {
 /// unreachable by `split`. Only the index after the last ':' is text; the path is bytes.
 pub fn resolve_hunk(patch: &Patch, addr: &OsStr) -> Result<(usize, usize), SelectError> {
     let bytes = os_bytes(addr);
-    let shown = String::from_utf8_lossy(bytes).into_owned();
-    let index_of = |b: &[u8]| std::str::from_utf8(b).ok().and_then(|s| s.parse().ok());
+    // Only built where the address is refused, as `PathIndex::resolve` does with a path.
+    let shown = || String::from_utf8_lossy(bytes).into_owned();
+    let index_of =
+        |b: &[u8]| -> Option<usize> { std::str::from_utf8(b).ok().and_then(|s| s.parse().ok()) };
     // A path may itself contain ':', so the split point is the last one whose tail is an index.
-    let (path, n): (Option<&[u8]>, Option<usize>) = match bytes.iter().rposition(|&b| b == b':') {
-        Some(i) if i > 0 && index_of(&bytes[i + 1..]).is_some() => {
-            (Some(&bytes[..i]), index_of(&bytes[i + 1..]))
-        }
-        _ => (None, index_of(bytes)),
+    let split = bytes
+        .iter()
+        .rposition(|&b| b == b':')
+        .filter(|&i| i > 0)
+        .and_then(|i| Some((&bytes[..i], index_of(&bytes[i + 1..])?)));
+    let (path, n) = match split {
+        Some((p, n)) => (Some(p), Some(n)),
+        None => (None, index_of(bytes)),
     };
-    let n = n.filter(|&n| n > 0).ok_or_else(|| {
-        // A bare address that is not an index is reported the way an unparsable selector is.
-        SelectError::BadSelector(shown.clone())
-    })?;
+    // A bare address that is not an index is reported the way an unparsable selector is.
+    let n = n
+        .filter(|&n| n > 0)
+        .ok_or_else(|| SelectError::BadSelector(shown()))?;
     let fi = PathIndex::new(patch).resolve(path)?;
     match &patch.files[fi].content {
         FileContent::Text(h) if n <= h.len() => Ok((fi, n - 1)),
-        FileContent::Text(_) => Err(SelectError::NoIndex(shown)),
-        FileContent::Binary(_) => Err(SelectError::BadSelector(format!("{shown} (binary file)"))),
+        FileContent::Text(_) => Err(SelectError::NoIndex(shown())),
+        FileContent::Binary(_) => Err(SelectError::BadSelector(format!(
+            "{} (binary file)",
+            shown()
+        ))),
     }
 }
 

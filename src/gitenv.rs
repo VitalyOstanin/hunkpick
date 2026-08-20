@@ -95,7 +95,14 @@ impl std::fmt::Display for FeedError {
     }
 }
 
-impl std::error::Error for FeedError {}
+impl std::error::Error for FeedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            FeedError::Spawn(e) | FeedError::Write(e) | FeedError::Wait(e) => Some(e),
+            FeedError::WriterPanicked => None,
+        }
+    }
+}
 
 /// Run `cmd` with `bytes` on its stdin and collect its output.
 ///

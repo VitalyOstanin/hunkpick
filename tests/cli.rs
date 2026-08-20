@@ -393,6 +393,51 @@ fn closed_downstream_pipe_is_not_an_error() {
     );
 }
 
+/// The "no final newline" flag belongs to one line of the input — its last — and so to one file:
+/// the last one. A selection that emits only an earlier file ends somewhere else entirely, and
+/// carrying the flag there would truncate a line nobody asked to change. The flag used to live in
+/// a variable the emit loop overwrote per file, correct only because the last iteration wrote
+/// last; this holds the property itself.
+#[test]
+fn only_a_selection_reaching_the_last_file_inherits_the_missing_newline() {
+    let diff = concat!(
+        "diff --git a/a b/a\n",
+        "--- a/a\n",
+        "+++ b/a\n",
+        "@@ -1,3 +1,3 @@\n",
+        " x\n",
+        "-y\n",
+        "+Y\n",
+        " z\n",
+        "diff --git a/b b/b\n",
+        "--- a/b\n",
+        "+++ b/b\n",
+        "@@ -1,2 +1,2 @@\n",
+        " p\n",
+        "-q\n",
+        "+Q", // the input ends here, without a newline
+    );
+
+    let from_the_first = common::run_ok_text(&["select", "a:1"], diff);
+    assert!(
+        from_the_first.ends_with('\n'),
+        "a selection that stops before the last file ends on a terminated line: {from_the_first:?}"
+    );
+
+    let from_the_last = common::run_ok_text(&["select", "b:1"], diff);
+    assert!(
+        !from_the_last.ends_with('\n'),
+        "a selection reaching the last line of the input reproduces its ending: {from_the_last:?}"
+    );
+
+    // Both files: the result still ends where the input did.
+    let both = common::run_ok_text(&["select", "a:1", "b:1"], diff);
+    assert!(
+        !both.ends_with('\n'),
+        "the whole selection ends where the input did: {both:?}"
+    );
+}
+
 /// A device that cannot take the output is an I/O failure, and has to be reported as one: the
 /// caller of `hunkpick select ... > file` on a full filesystem must not get a truncated file at
 /// exit 0. `/dev/full` accepts an `open` and answers every write with ENOSPC, which is that
