@@ -636,11 +636,12 @@ hermetic — several tests shell out to `git apply --check` and require `git` on
 
 `cargo t` includes generated tests: a differential suite that compares hunkpick with real git
 over generated diffs, and property tests over shapes git will not produce on demand. The fuzz
-targets in [`fuzz/`](https://github.com/VitalyOstanin/hunkpick/blob/master/fuzz) need nightly and are run separately (`RUSTUP_TOOLCHAIN=nightly
-cargo fuzz run --target x86_64-unknown-linux-gnu parse -- -max_total_time=60` — both the
-toolchain variable and the explicit triple matter); CI builds each target on every push and runs
-a longer search twice a week. See [`CONTRIBUTING.md`](https://github.com/VitalyOstanin/hunkpick/blob/master/CONTRIBUTING.md) for what each kind
-covers, why those two flags are needed, and how a failure is reproduced.
+targets in [`fuzz/`](https://github.com/VitalyOstanin/hunkpick/blob/master/fuzz) need nightly and are run separately, through
+[`scripts/fuzz-all.sh`](https://github.com/VitalyOstanin/hunkpick/blob/master/scripts/fuzz-all.sh) (`FUZZ_SECONDS=60 scripts/fuzz-all.sh parse`
+for one target, one minute); CI builds each target on every push and runs a longer search twice
+a week. See [`CONTRIBUTING.md`](https://github.com/VitalyOstanin/hunkpick/blob/master/CONTRIBUTING.md) for what each kind covers, why the
+command needs a toolchain override, an explicit triple, a corpus directory and a hang timeout,
+and how a failure is reproduced.
 
 ## License
 

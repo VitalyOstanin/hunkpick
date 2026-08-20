@@ -7,9 +7,14 @@
 # replayed against the target it belongs to, with the same compiler the search
 # used. The first failure stops the run, which is the point -- the input that
 # still crashes is the one to look at.
+#
+# RUSTUP_TOOLCHAIN and the spelled-out triple are needed for the same reasons as
+# in fuzz-all.sh: rust-toolchain.toml pins the repository to stable, and
+# cargo-fuzz otherwise builds for the triple it was itself built for.
 set -uo pipefail
 
 TRIPLE="${FUZZ_TRIPLE:-x86_64-unknown-linux-gnu}"
+export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}"
 
 for artifact in fuzz/artifacts/*/*; do
     [ -e "$artifact" ] || continue

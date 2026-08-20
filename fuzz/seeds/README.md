@@ -12,12 +12,16 @@ escapes, content that is not valid UTF-8, and a UTF-8 byte-order mark in the pre
 `selectors` target reads a diff, a NUL byte and then one selector per line, so its seeds carry
 both halves; one addresses a quoted path by its decoded bytes.
 
-Passed on the command line alongside the corpus directory:
+They are passed on the command line alongside the corpus directory, which is what
+[`scripts/fuzz-all.sh`](../../scripts/fuzz-all.sh) does:
 
 ```sh
-cargo fuzz run <target> fuzz/corpus/<target> fuzz/seeds/<target> \
-  -- -dict=fuzz/dictionaries/diff.dict
+scripts/fuzz-all.sh <target>
 ```
+
+The full command needs a nightly toolchain override, a spelled-out target triple, a corpus
+directory created beforehand and a hang timeout; the script carries all four, and
+[`CONTRIBUTING.md`](../../CONTRIBUTING.md) explains why each is there.
 
 New inputs are written to the first directory, so the seeds stay as committed. A crash worth
 keeping still becomes a regression test in `tests/`, not a file here.

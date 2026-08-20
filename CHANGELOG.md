@@ -46,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `1-1048576` — 2.6 KB of arguments against a four-sub-hunk diff — reached 1.6 GB of RSS before
   any index was compared against the diff. The cap is now one allowance for the whole
   invocation, and its message says so.
+- Fuzzing is run from `scripts/fuzz-all.sh` and `scripts/fuzz-repro.sh` instead of a command
+  copied out of the guides. The documented command was missing `mkdir -p fuzz/corpus/<target>`,
+  and the corpus directory is gitignored, so on a fresh clone libFuzzer refused to start; the
+  scheduled CI run had already failed on exactly that and gained the step, while the guides did
+  not. `fuzz/seeds/README.md` also omitted the nightly override and the explicit target triple
+  that CONTRIBUTING.md calls mandatory, and the local command had no `-timeout=10`, so one hung
+  input could swallow a short run's whole budget. The scripts carry all four, and a test checks
+  that every script the documentation names exists and is executable.
 - Documentation no longer contradicts the tool. Two README examples still recommended
   `--verify-result-diff-git` on a `git diff | hunkpick ... | git apply --cached` pipeline after
   the README gained the paragraph explaining that such a command reports a correct result as a

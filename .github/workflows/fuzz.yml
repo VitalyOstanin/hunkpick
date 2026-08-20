@@ -95,8 +95,8 @@ jobs:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
       # A crash is the whole point of the run: keep the input that produced it, so it can be
-      # replayed locally (`cargo fuzz run <target> <artifact>`) and turned into a regression
-      # test in tests/.
+      # replayed locally (drop it into fuzz/artifacts/<target>/ and run scripts/fuzz-repro.sh)
+      # and turned into a regression test in tests/.
       - name: Upload the crashing input
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

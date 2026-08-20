@@ -2,10 +2,16 @@
 # Run every fuzz target in turn; the first crash stops the run.
 #
 # Usage: scripts/fuzz-all.sh
+#        scripts/fuzz-all.sh parse selectors
 #        FUZZ_SECONDS=600 scripts/fuzz-all.sh
 #
 # Needs a nightly toolchain and cargo-fuzz: the sanitizer coverage libFuzzer
 # steers by is a nightly flag.
+#
+# RUSTUP_TOOLCHAIN, not `cargo +nightly`: rust-toolchain.toml pins the whole
+# repository to stable, and a toolchain file wins over the toolchain named on
+# the command line for the crate it covers. Without the override cargo-fuzz
+# hands the build to stable rustc, which rejects the -Z sanitizer flags.
 #
 # mkdir first, because the corpus is gitignored: a tree that has never fuzzed
 # locally does not carry it, and libFuzzer refuses to start when the writable
@@ -22,8 +28,12 @@
 set -uo pipefail
 
 TARGETS=(parse roundtrip selectors)
+if [ "$#" -gt 0 ]; then
+    TARGETS=("$@")
+fi
 TRIPLE="${FUZZ_TRIPLE:-x86_64-unknown-linux-gnu}"
 SECONDS_PER_TARGET="${FUZZ_SECONDS:-300}"
+export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}"
 
 for target in "${TARGETS[@]}"; do
     mkdir -p "fuzz/corpus/${target}" || exit 1

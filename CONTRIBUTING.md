@@ -78,20 +78,16 @@ defect is worth adding to the hand-written tests as well — `proptest-regressio
 generated locally and not committed, because a saved seed says nothing about what broke.
 
 The fuzz targets need nightly (libFuzzer uses `-Z` flags) and a C++ toolchain, so they are not
-part of the normal loop. Run them the way CI does:
+part of the normal loop. Two scripts hold the command:
 
 ```sh
-# One target, one minute, starting from the committed seeds and the token dictionary.
-RUSTUP_TOOLCHAIN=nightly cargo fuzz run --target x86_64-unknown-linux-gnu parse \
-  fuzz/corpus/parse fuzz/seeds/parse \
-  -- -max_total_time=60 -dict=fuzz/dictionaries/diff.dict
-
-# Replay a crash the fuzzer kept.
-RUSTUP_TOOLCHAIN=nightly cargo fuzz run --target x86_64-unknown-linux-gnu parse \
-  fuzz/artifacts/parse/<id>
+scripts/fuzz-all.sh                          # every target, five minutes each
+FUZZ_SECONDS=60 scripts/fuzz-all.sh parse    # one target, one minute
+scripts/fuzz-repro.sh                        # replay every crash under fuzz/artifacts/
 ```
 
-Two details in that command are not obvious, and both cost a confusing failure otherwise:
+They are scripts rather than a command to copy because four parts of that command are not
+obvious, and each costs a confusing failure on its own:
 
 - `RUSTUP_TOOLCHAIN=nightly`, not `cargo +nightly`. [`rust-toolchain.toml`](rust-toolchain.toml)
   pins the repository to stable and that file wins over an installed toolchain, so cargo-fuzz
@@ -100,6 +96,12 @@ Two details in that command are not obvious, and both cost a confusing failure o
   itself built for, and the prebuilt binary `cargo binstall cargo-fuzz` installs is a static
   musl build; ASan cannot work against a statically linked libc, so the default fails with
   `sanitizer is incompatible with statically linked libc`.
+- `mkdir -p fuzz/corpus/<target>` before the run. The corpus is gitignored, so a fresh clone
+  does not carry it, and libFuzzer refuses to start when the writable corpus directory is
+  missing — it does not create it. This is what the first scheduled run in CI failed on.
+- `-timeout=10`. The libFuzzer default is 1200 s, so one hung input would silently eat the
+  whole budget of a short run; parsing an input of the size libFuzzer generates takes
+  milliseconds, which makes ten seconds a wide margin and still reports a hang as a crash.
 
 `fuzz/seeds/` holds a committed starting point per target (see
 [`fuzz/seeds/README.md`](fuzz/seeds/README.md)) and `fuzz/dictionaries/diff.dict` the tokens a

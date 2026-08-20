@@ -2,8 +2,9 @@ name: fuzz-setup
 description: >-
   Everything a fuzzing job needs before it can run cargo-fuzz: the nightly
   toolchain libFuzzer requires, a cache covering both workspaces, and the
-  cargo-fuzz binary. Shared by the per-push smoke job in ci.yml and the
-  scheduled search in fuzz.yml so the toolchain and the pins are stated once.
+  cargo-fuzz binary. Shared by the per-push build job in ci.yml, which compiles
+  every target without running one, and the scheduled search in fuzz.yml, so the
+  toolchain and the pins are stated once.
 
 runs:
   using: composite
