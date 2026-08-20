@@ -29,7 +29,8 @@ Examples:
 
   # Split a sub-hunk by individual changed lines (@L numbers the +/- lines 1..N,
   # see `list --json` changed_lines). @L keeps both leading and trailing context
-  # so every subset applies. Split an addition-only block of 120 lines across
+  # so a subset applies with no boundary restriction (two exceptions; see
+  # `hunkpick select --help`). Split an addition-only block of 120 lines across
   # commits, one piece per round. The re-diff shows only what is left, renumbered
   # from 1, so the second round asks for 1-30 rather than 91-120:
   git diff src/lib.rs | hunkpick select 1@L1-90 | git apply --cached

@@ -46,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `1-1048576` — 2.6 KB of arguments against a four-sub-hunk diff — reached 1.6 GB of RSS before
   any index was compared against the diff. The cap is now one allowance for the whole
   invocation, and its message says so.
+- Documentation no longer contradicts the tool. Two README examples still recommended
+  `--verify-result-diff-git` on a `git diff | hunkpick ... | git apply --cached` pipeline after
+  the README gained the paragraph explaining that such a command reports a correct result as a
+  failure (exit 70); both now show a patch file against a tree at the pre-patch state, and a test
+  reads the shell blocks of README.md and CONTRIBUTING.md so the shape cannot come back.
+  `hunkpick --help` claimed "every subset applies" for `@L` while `select --help` and the README
+  already listed the two exceptions. The README described the selector index ceiling as per
+  selector, which it no longer is, and called two of the four lossy JSON text fields lossy.
 
 ### Changed
 

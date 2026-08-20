@@ -171,7 +171,7 @@ character it was. That is deliberate — the machine-readable mode reports what 
 not a display-safe rendering of it — so **a consumer that prints these fields to a terminal
 must escape them itself**. Prefer the human listing when a person is reading the output.
 
-Two of those fields are also lossy for a path or a line that is not valid UTF-8 (legal on
+All four are also lossy for a path or a line that is not valid UTF-8 (legal on
 Unix): JSON must be UTF-8, so undecodable bytes become `U+FFFD`. A path taken from `list
 --json` therefore does not necessarily round-trip back into a `path:N` selector. For such a
 file, address the sub-hunk by its content id (`@id`), which is computed over the raw bytes and
@@ -242,8 +242,10 @@ git diff src/lib.rs | hunkpick split 1 --at 5
 # Same for a named file in a multi-file diff
 git diff | hunkpick split src/lib.rs:1 --at 5,12
 
-# With git verification
-git diff src/lib.rs | hunkpick split 1 --at 5 --verify-result-diff-git -C /path/to/repo
+# With git verification. The check reads the working tree, so it belongs on a patch file
+# against a tree at the pre-patch state — not on a `git diff |` pipeline, where it would
+# reject a correct result. See "Git apply check (optional)".
+hunkpick split 1 --at 5 -i patch.diff --verify-result-diff-git -C /path/to/clean/checkout
 ```
 
 ### Staging recipe
@@ -452,11 +454,12 @@ and it runs by default.
 hunkpick select 1 -i patch.diff --verify-result-diff-git -C /path/to/clean/checkout
 ```
 
-Use `-C <DIR>` to specify the working tree directory (default: current directory).
-`-C` requires `--verify-result-diff-git`; passing `-C` alone is a usage error.
+Use `-C <DIR>` to specify the working tree directory the check runs against (default:
+current directory). `-C` requires `--verify-result-diff-git`; passing `-C` alone is a usage
+error.
 
 ```sh
-git diff path | hunkpick select 1 --verify-result-diff-git -C /path/to/repo
+hunkpick select 1 -i patch.diff --verify-result-diff-git -C /path/to/clean/checkout
 ```
 
 ### Verification failure
@@ -532,10 +535,12 @@ Note: the working-set memory is several times the input size (the input buffer, 
 parsed model, and the emitted diff coexist), so a 64 MiB input corresponds to a few
 hundred MiB of peak RAM. Lower the limit if you run in a memory-constrained environment.
 
-One other limit exists and is not configurable: a single selector may name at most **1 048 576**
-(2^20) indices, so `1-99999999` is a usage error (exit code 2) rather than an allocation. That
-ceiling is far above the sub-hunk count of any real diff — there is no legitimate reason to
-raise it, hence no flag.
+One other limit exists and is not configurable: the selectors of one invocation may name at
+most **1 048 576** (2^20) indices *between them*, so `1-99999999` is a usage error (exit code 2)
+rather than an allocation, and so is a long list of smaller ranges that adds up past the
+ceiling. The allowance is shared because the number of selectors is bounded only by the length
+of the command line. It is far above the sub-hunk count of any real diff — there is no
+legitimate reason to raise it, hence no flag.
 
 ### Validation
 
