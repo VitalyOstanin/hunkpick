@@ -336,6 +336,30 @@ mod tests {
         assert_eq!(got, data);
     }
 
+    /// The four marks, each named exactly. The order of the arms is what makes this work:
+    /// a UTF-32LE stream opens with the UTF-16LE mark, so a rearranged `match` would call it
+    /// UTF-16LE and hand the user an `iconv -f UTF-16LE` that cannot restore their file. A test
+    /// asserting only that the message says "UTF-16" passes on exactly that mistake.
+    #[test]
+    fn every_byte_order_mark_is_named_by_its_own_encoding() {
+        let cases: [(&[u8], Option<&str>); 6] = [
+            (&[0xFF, 0xFE, 0x00, 0x00, b'-'], Some("UTF-32LE")),
+            (&[0x00, 0x00, 0xFE, 0xFF, b'-'], Some("UTF-32BE")),
+            (&[0xFF, 0xFE, b'-', 0x00], Some("UTF-16LE")),
+            (&[0xFE, 0xFF, 0x00, b'-'], Some("UTF-16BE")),
+            (b"diff --git a/f b/f", None),
+            (&[0xEF, 0xBB, 0xBF, b'd'], None),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                utf16_or_32_bom(input),
+                expected,
+                "byte-order mark {:02X?}",
+                &input[..input.len().min(4)]
+            );
+        }
+    }
+
     #[test]
     fn read_limited_rejects_oversized_input() {
         let data = b"0123456789";

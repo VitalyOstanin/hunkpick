@@ -148,6 +148,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are five: `fuzz/Cargo.lock` is checked too. The job numbers in "If something fails" follow the
   table again.
 
+- Six test gaps this cycle opened are closed. The four byte-order marks are checked one by one,
+  by name: the single test asserting the message says "UTF-16" also passed when a UTF-32LE input
+  was misdiagnosed as UTF-16LE, which is the mistake the arm order guards against. An I/O failure
+  on stdout is now held by a test (`/dev/full`, exit 74 with the diagnostic) instead of by a
+  comment. The seven repository-locating variables get a case each, with a count assertion that
+  fails on a name added to the list and not to the table. The differential timings in the source
+  cover all six tests that draw their case count from the same place, not three, and the
+  documented soak (`HUNKPICK_DIFF_CASES=2000`) comes with the timeout it needs — measured, the
+  slowest test goes from 4.5 s to 44.5 s against a 60 s kill. The linearity check takes the
+  fastest of three runs per size, so a scheduler pause on a shared runner no longer moves the
+  verdict. And a property-test counterexample found in CI is uploaded as an artifact, the way a
+  fuzzer crash already was: the seed lives only on the runner, and a re-run draws a new one.
+
 ### Changed
 
 - A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being

@@ -108,29 +108,65 @@ fn tampered_diff_fails_git_check() {
 /// `-C DIR` must stay the only thing that selects the repository for the git check, whatever
 /// git variables the caller had set. As it stands `git apply --check` reads the working tree
 /// and ignores them; this pins that the check does not start depending on the environment.
+///
+/// One case per name in `gitenv::REPO_LOCATING_VARS`, and a count assertion so a name added to
+/// the list without a case here fails rather than going unguarded. The values differ by
+/// variable — a directory, a file, a path list — so the table pairs each name with something
+/// git would act on. `GIT_INDEX_FILE` and `GIT_OBJECT_DIRECTORY` are why the list exists: they
+/// arrive set from hooks and `git rebase --exec`.
+///
+/// What this can prove today is limited, and deliberately so: `git apply --check` without
+/// `--index`/`--cached` reads the working tree of the directory it runs in, so removing the
+/// insulation altogether leaves every case here green (checked by removing it). The invariant
+/// under guard is the one that would break the day the check gains a flag that consults the
+/// index — plus the list-to-table correspondence above, which does fail on a name added to one
+/// and not the other.
 #[test]
-fn git_check_ignores_inherited_git_dir() {
+fn git_check_ignores_every_inherited_repository_variable() {
     let target = repo_with(&[("f", "a\nb\nc\n")]);
     let diff = diff_after(&target, &[("f", "a\nB\nc\n")]);
     revert(&target);
 
     // A second, unrelated repository whose content the diff does not match.
     let other = repo_with(&[("other.txt", "x\n")]);
+    let git_dir = other.path().join(".git");
+    let table: [(&str, std::path::PathBuf); 7] = [
+        ("GIT_DIR", git_dir.clone()),
+        ("GIT_WORK_TREE", other.path().to_path_buf()),
+        ("GIT_COMMON_DIR", git_dir.clone()),
+        ("GIT_INDEX_FILE", git_dir.join("index")),
+        ("GIT_OBJECT_DIRECTORY", git_dir.join("objects")),
+        ("GIT_ALTERNATE_OBJECT_DIRECTORIES", git_dir.join("objects")),
+        ("GIT_CEILING_DIRECTORIES", other.path().to_path_buf()),
+    ];
+    assert_eq!(
+        table.len(),
+        hunkpick::gitenv::REPO_LOCATING_VARS.len(),
+        "every variable the crate drops needs a case here"
+    );
+    for (var, _) in &table {
+        assert!(
+            hunkpick::gitenv::REPO_LOCATING_VARS.contains(var),
+            "{var} is not one of the variables the crate drops"
+        );
+    }
 
-    Command::cargo_bin("hunkpick")
-        .unwrap()
-        .args([
-            "select",
-            "1",
-            "--verify-result-diff-git",
-            "-C",
-            target.path().to_str().unwrap(),
-        ])
-        .env("GIT_DIR", other.path().join(".git").to_str().unwrap())
-        .env("GIT_WORK_TREE", other.path().to_str().unwrap())
-        .write_stdin(diff)
-        .assert()
-        .success();
+    for (var, value) in table {
+        Command::cargo_bin("hunkpick")
+            .unwrap()
+            .args([
+                "select",
+                "1",
+                "--verify-result-diff-git",
+                "-C",
+                target.path().to_str().unwrap(),
+            ])
+            .env(var, &value)
+            .write_stdin(diff.clone())
+            .assert()
+            .try_success()
+            .unwrap_or_else(|e| panic!("with {var} set to {}: {e}", value.display()));
+    }
 }
 
 /// A diff whose last sub-hunk deletes the tail of the file: the deletion carries no new-side

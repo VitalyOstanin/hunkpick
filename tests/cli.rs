@@ -393,6 +393,50 @@ fn closed_downstream_pipe_is_not_an_error() {
     );
 }
 
+/// A device that cannot take the output is an I/O failure, and has to be reported as one: the
+/// caller of `hunkpick select ... > file` on a full filesystem must not get a truncated file at
+/// exit 0. `/dev/full` accepts an `open` and answers every write with ENOSPC, which is that
+/// situation without needing a filesystem to fill.
+///
+/// The explicit flush at the end of `main` exists for the same contract from the other side —
+/// the buffered tail of a result diff that ends without a newline. That path is not reachable
+/// here: `LineWriter` writes through as far as the last newline, so a device failing every write
+/// fails one of those first, and a closed reader is met by `write_out` for the same reason.
+#[test]
+#[cfg(unix)]
+fn output_that_cannot_be_written_is_reported_not_swallowed() {
+    use std::process::{Command as Sys, Stdio};
+
+    let Ok(full) = std::fs::OpenOptions::new().write(true).open("/dev/full") else {
+        // Not a Linux runner: the device is absent, and nothing here can be asserted.
+        return;
+    };
+
+    let out = Sys::new(assert_cmd::cargo::cargo_bin("hunkpick"))
+        .args(["select", "1"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(full))
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(TWO_CHANGES.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(74), "an I/O failure exits 74");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("No space left") || stderr.contains("os error 28"),
+        "the diagnostic must name what went wrong: {stderr}"
+    );
+}
+
 /// Auto-splitting a hunk with many change runs must stay linear in their number. Recomputing
 /// the prefix tally per sub-hunk made this quadratic; at 20 000 runs the difference is between
 /// a fraction of a second and the test profile's slow-test timeout.
@@ -638,9 +682,21 @@ fn emitting_trailing_lines_stays_linear_in_the_number_of_hunks() {
         elapsed
     }
 
+    /// The fastest of three runs. A shared runner can only make a run slower — a scheduler
+    /// pause on the large size, or an unusually quick small one, moves the ratio without
+    /// anything changing in the code — and the minimum is the measurement least exposed to
+    /// that. One measurement each left only a factor of two between the linear expectation
+    /// and the threshold.
+    fn best_of_three(hunks: usize) -> std::time::Duration {
+        (0..3)
+            .map(|_| split_duration(hunks))
+            .min()
+            .expect("three runs")
+    }
+
     const SMALL: usize = 8_000;
-    let small = split_duration(SMALL);
-    let large = split_duration(SMALL * 4);
+    let small = best_of_three(SMALL);
+    let large = best_of_three(SMALL * 4);
     let ratio = large.as_secs_f64() / small.as_secs_f64().max(f64::MIN_POSITIVE);
     assert!(
         ratio < 8.0,

@@ -77,6 +77,18 @@ jobs:
       # nextest does not run doctests; keep them covered explicitly.
       - name: Run doctests
         run: cargo test --all-features --doc
+      # The property tests draw a fresh seed on every run, so a rare counterexample is red once
+      # and green on re-run, and the seed that produced it lives only in `proptest-regressions/`
+      # on the runner. That directory is gitignored on purpose — a saved seed records that
+      # something broke, not what broke — but losing it means the failure cannot be replayed at
+      # all. Same treatment as the crashing input in fuzz.yml.
+      - name: Upload the property-test counterexample
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proptest-regressions-${{ matrix.os }}
+          path: proptest-regressions/
+          if-no-files-found: ignore
 
   coverage:
     name: Coverage

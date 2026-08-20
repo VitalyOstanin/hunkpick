@@ -104,7 +104,16 @@ survived several reviews were found by generating inputs, not by reading code.
 Cases 1 and 2 are deterministic: a failure names the seed (differential) or shrinks to the
 smallest failing shape (property), so it reproduces. The differential suite runs 200 generated
 cases by default (30 on Windows, where process spawns cost an order of magnitude more);
-`HUNKPICK_DIFF_CASES=2000 cargo t` soaks it harder without editing the source. A shrunk case that turns out to be a real
+`HUNKPICK_DIFF_CASES=2000` soaks it harder without editing the source, but the count and the
+per-test timeout have to move together — at 2000 cases the slowest of those tests takes about
+45 s where it takes 4.5 s at the default, and the profile kills a test at 60 s, which reads as a
+hang rather than as a finished soak:
+
+```sh
+HUNKPICK_DIFF_CASES=2000 cargo nextest run --all-features \
+  --slow-timeout period=300s,terminate-after=2
+```
+ A shrunk case that turns out to be a real
 defect is worth adding to the hand-written tests as well — `proptest-regressions` files are
 generated locally and not committed, because a saved seed says nothing about what broke.
 

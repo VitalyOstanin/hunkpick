@@ -18,11 +18,12 @@ use tempfile::TempDir;
 /// How many generated cases the whole-selection properties run over. Each case is a commit plus
 /// a handful of hunkpick invocations.
 ///
-/// Measured on Linux (debug build, warm cache): 2.6 s for `selecting_everything…`, 2.2 s for
-/// `every_random_subset…`, 1.0 s for the staging loop — against the 60 s the profile in
-/// `.config/nextest.toml` allows (`slow-timeout` 30 s, `terminate-after = 2`). That is more than
-/// twenty times the margin, so a timeout there means something hung, not that the machine was
-/// busy.
+/// Measured on Linux (debug build, warm cache, one test at a time) for every test that draws
+/// its count from here: 4.5 s `selecting_everything…`, 4.1 s `a_selection_is_valid_input…`,
+/// 3.9 s `every_random_subset…`, 1.5 s the staging loop, 1.2 s the multi-file case, 1.0 s the
+/// line slices — against the 60 s the profile in `.config/nextest.toml` allows (`slow-timeout`
+/// 30 s, `terminate-after = 2`). Better than a tenfold margin on the slowest, so a timeout
+/// there means something hung, not that the machine was busy.
 ///
 /// Windows gets a smaller count. A case is dominated by process spawns — `git` and `hunkpick`
 /// through `assert_cmd` — and spawning there costs an order of magnitude more than on Unix, so
@@ -31,7 +32,11 @@ use tempfile::TempDir;
 /// would weaken the guard against a genuinely hung test.
 ///
 /// `HUNKPICK_DIFF_CASES` overrides both counts (the staging one scaled in the same proportion),
-/// so a longer soak can be run without touching the source: `HUNKPICK_DIFF_CASES=2000 cargo t`.
+/// so a longer soak can be run without touching the source. Raise the timeout with it: at 2000
+/// cases the slowest test above takes 44.5 s on the machine where it takes 4.5 s here, and the
+/// profile would kill it at 60 s — a soak that ends in a kill looks like a hang rather than a
+/// finished soak. The pair to use is
+/// `HUNKPICK_DIFF_CASES=2000 cargo nextest run --all-features --slow-timeout period=300s,terminate-after=2`.
 #[cfg(not(windows))]
 const DEFAULT_CASES: u64 = 200;
 #[cfg(windows)]
