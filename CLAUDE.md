@@ -15,7 +15,7 @@ library (`src/lib.rs`) and a binary (`src/main.rs`).
   `clippy.toml` (`msrv`), and gated by the `msrv` job in CI. `rust-toolchain.toml` pins only the
   channel and the components, not a version. On edition 2024 the resolver reads `rust-version`
   itself, so a dependency needing a newer compiler is not selected in the first place.
-  `cargo +1.85 build` must keep passing.
+  `cargo +1.85 check --all-targets` must keep passing.
 
 ## Development loop
 

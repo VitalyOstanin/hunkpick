@@ -34,7 +34,7 @@ cargo t                                                     # unit + integration
 cargo t-doc                                                 # doc tests (nextest does not run them)
 cargo clippy --all-targets --all-features -- -D warnings    # lint, warnings denied
 cargo fmt --all --check                                     # formatting (apply with `cargo fmt --all`)
-cargo +1.85 build --all-features                            # MSRV build
+cargo +1.85 check --all-targets --all-features              # MSRV check (incl. dev-deps)
 cargo semver-checks check-release                           # public API vs the released version
 ```
 

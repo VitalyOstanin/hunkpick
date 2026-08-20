@@ -121,12 +121,19 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # rust-toolchain.toml pins the repository to stable, and that file wins over the
+      # toolchain the next step installs — without this override the gate would build on
+      # stable and report success without ever seeing 1.85. Same reason as fuzz-setup.
+      - shell: bash
+        run: echo "RUSTUP_TOOLCHAIN=1.85.0" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@bc540ba06a4ccee415bb241490e0b25ee8e7d315 # 1.85.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # `--locked` as in the release workflow: the MSRV gate must be checked against the
       # dependency versions the project actually ships, not whatever resolves today.
-      - name: Build
-        run: cargo build --locked
+      # `--all-targets` reaches the dev-dependencies as well: the `proptest = "~1.11"` pin
+      # exists because that release needs exactly 1.85, and `cargo build` never compiles it.
+      - name: Check on the minimum supported version
+        run: cargo check --locked --all-targets
 
   semver:
     name: Semver (public API)

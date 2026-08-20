@@ -616,8 +616,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 # Check formatting (CI verifies this; use `cargo fmt --all` to apply).
 cargo fmt --all --check
 
-# Verify the code still builds on the minimum supported Rust version (1.85).
-cargo +1.85 build --all-features
+# Verify the code still compiles on the minimum supported Rust version (1.85).
+# `--all-targets` includes the tests, so the dev-dependencies are checked too.
+cargo +1.85 check --all-targets --all-features
 ```
 
 `t` and `t-doc` are aliases from [`.cargo/config.toml`](https://github.com/VitalyOstanin/hunkpick/blob/master/.cargo/config.toml); the CI workflow

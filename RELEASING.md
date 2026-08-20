@@ -22,7 +22,7 @@ Jobs run in this order; everything reversible happens before the one step that i
 |---|--------------------|-------------------------------------------------------------------------------|
 | 1 | `test`             | Test suite on ubuntu / macOS / Windows at the tagged commit                    |
 | 2 | `lint`             | `clippy -D warnings`, `cargo fmt --check`, docs build                          |
-| 3 | `msrv`             | `cargo build --locked` on the minimum supported Rust version                   |
+| 3 | `msrv`             | `cargo check --locked --all-targets` on the minimum supported Rust version     |
 | 4 | `package-binaries` | Builds each target, generates the notices, packs and verifies every archive    |
 | 5 | `publish`          | `cargo publish --locked`, then creates the GitHub Release from the changelog   |
 | 6 | `upload-assets`    | Attaches the archives (built in step 4) to that Release                        |

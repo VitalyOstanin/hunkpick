@@ -35,7 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `@@ -+1,3 +1,3 @@` and `@@ -1,+3 +1,3 @@` all parsed and were rendered back as
   `@@ -1,3 +1,3 @@` at exit 0, while git reads every one of them as a corrupt patch. The leading
   `-` and `+` are now required, and a range component has to be plain ASCII digits.
-
 - Selecting by a content id shared by several sub-hunks scaled as the square of the number of
   matches, in both time and memory. Reading every id out of `list --json` and passing them back
   — the documented batch flow — names such an id once per sub-hunk, and each naming both
@@ -55,6 +54,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a stream, and "binary input: NUL byte found" sent the reader looking for a binary file in the
   pipeline rather than at the encoding of their own patch. The diff is still not re-encoded
   (ADR 0005) — the message says what to run.
+- The MSRV gate now builds on the minimum supported version it names. `rust-toolchain.toml`
+  pins the repository to `stable`, and a toolchain file wins over an installed default, so both
+  the CI job and the release job that `publish` waits on compiled on stable and reported success
+  without ever seeing 1.85. Both now set `RUSTUP_TOOLCHAIN` first, as the fuzzing setup already
+  did, and run `cargo check --locked --all-targets` so the dev-dependencies are compiled too —
+  `proptest` is pinned to `~1.11` for an MSRV reason that `cargo build` never reached.
 - `git apply --check`, run for `--verify-result-diff-git`, now runs in the C locale. Its stderr
   is shown next to hunkpick's own ASCII-English text, so an inherited locale used to put another
   language — or U+FFFD, where the bytes were not UTF-8 — in front of the user.

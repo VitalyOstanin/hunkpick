@@ -182,12 +182,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RELEASE_REF }}
+      # rust-toolchain.toml pins the repository to stable and wins over the toolchain the
+      # next step installs; without this override the gate `publish` waits on would build on
+      # stable, so an MSRV break would reach crates.io behind a green check. See ci.yml.
+      - shell: bash
+        run: echo "RUSTUP_TOOLCHAIN=1.85.0" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@bc540ba06a4ccee415bb241490e0b25ee8e7d315 # 1.85.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Fetch dependencies (with retry)
         uses: ./.github/actions/cargo-fetch-retry
-      - name: cargo build --locked
-        run: cargo build --locked --verbose
+      # `--all-targets` so the dev-dependencies are compiled too — the `proptest = "~1.11"`
+      # pin is an MSRV pin, and `cargo build` alone never reaches it.
+      - name: cargo check --locked --all-targets
+        run: cargo check --locked --all-targets --verbose
 
   publish:
     name: Publish to crates.io
