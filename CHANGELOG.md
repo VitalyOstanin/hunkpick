@@ -186,6 +186,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   about the wrong thing entirely; the knob is bounded at a million, which no run could finish
   anyway.
 
+- The one place in the repository that built a command line as a string now quotes what it puts
+  there. The terminal-hint test runs hunkpick under `script -c`, which hands its argument to a
+  shell, so the build path was parsed as shell text: a space in it — a checkout under one, or a
+  `CARGO_TARGET_DIR` pointing at one — split the command (reproduced), and a metacharacter in it
+  would have been executed during an ordinary `cargo test`. The path is not attacker-supplied,
+  so this is hardening rather than a hole.
+
 ### Changed
 
 - A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being

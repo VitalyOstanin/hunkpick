@@ -956,6 +956,29 @@ fn a_piped_diff_produces_no_terminal_hint() {
         .stderr(predicate::str::is_empty());
 }
 
+/// `word` as one argument for a POSIX shell. `script -c` hands its argument to a shell rather
+/// than executing it, so the build path reaches that shell as text: a space in it — a checkout
+/// under one, or a `CARGO_TARGET_DIR` pointing at one — splits the command, and a metacharacter
+/// in it would be executed. This is the only place in the repository that builds a command line
+/// as a string; everywhere else `git` and `hunkpick` are spawned with an argument array.
+///
+/// Single quotes suspend every expansion a shell does. The one byte they cannot carry is the
+/// single quote itself, spelled here the usual way: close, escape one, reopen.
+#[cfg(target_os = "linux")]
+fn single_quoted(word: &str) -> String {
+    format!("'{}'", word.replace('\'', r"'\''"))
+}
+
+/// The escaping above, on the shapes that would otherwise reach the shell as syntax.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_path_is_one_word_however_it_is_spelled() {
+    assert_eq!(single_quoted("/tmp/hp target/x"), "'/tmp/hp target/x'");
+    assert_eq!(single_quoted("/a;rm -rf b/x"), "'/a;rm -rf b/x'");
+    assert_eq!(single_quoted("/a$(id)/x"), "'/a$(id)/x'");
+    assert_eq!(single_quoted("/it's/x"), r"'/it'\''s/x'");
+}
+
 /// With no pipe and no `-i`, hunkpick reads the terminal — the behaviour of any filter, and the
 /// only way a hand-pasted diff can work. Silence makes that indistinguishable from a hang: the
 /// user who typed `hunkpick list` instead of `git diff | hunkpick list` sees a dead terminal.
@@ -966,8 +989,9 @@ fn a_piped_diff_produces_no_terminal_hint() {
 #[cfg(target_os = "linux")]
 fn a_terminal_on_stdin_gets_a_hint() {
     let exe = assert_cmd::cargo::cargo_bin("hunkpick");
+    let command = format!("{} list", single_quoted(&exe.to_string_lossy()));
     let out = std::process::Command::new("script")
-        .args(["-qec", &format!("{} list", exe.display()), "/dev/null"])
+        .args(["-qec", &command, "/dev/null"])
         .stdin(std::process::Stdio::null())
         .output()
         .expect("util-linux script provides the pty");
