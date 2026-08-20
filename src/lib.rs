@@ -55,12 +55,24 @@
 #![warn(missing_docs)]
 
 /// Command-line surface: the argument types clap derives the CLI from, and colour resolution.
+///
+/// Not part of the library contract. The binary and the integration tests are separate crates,
+/// so these types cannot be `pub(crate)`; hiding them keeps `cargo semver-checks` out of them,
+/// because a new CLI flag is a new public field of an exhaustively constructible struct and
+/// would otherwise force a minor version on a release that changes nothing for a library user.
+#[doc(hidden)]
 pub mod cli;
 /// Render a [`model::Patch`] back to a unified diff, byte-for-byte for git-canonical input.
 pub mod emit;
 /// Application errors and the process exit codes they map to.
 pub mod error;
-/// The environment variables that decide which repository a `git` child acts on.
+/// The environment variables that decide which repository a `git` child acts on, and the
+/// plumbing that feeds one a diff.
+///
+/// Not part of the library contract, and public for the same reason as [`cli`]: the test crates
+/// insulate their `git` invocations exactly the way the tool does, and they cannot see a
+/// `pub(crate)` item.
+#[doc(hidden)]
 pub mod gitenv;
 #[cfg(test)]
 mod gittest;

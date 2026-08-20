@@ -187,10 +187,26 @@ fn new_file(headers: Vec<Vec<u8>>) -> FileDiff {
     }
 }
 
+/// Whether `input` has a line that opens a diff.
+///
+/// The set of lines that count lives here, next to the code that reads them: a caller deciding
+/// whether to hand something to [`parse`] at all — the CLI does, before it reports "this is not
+/// a diff" — must not keep a second list that can disagree with this one.
+///
+/// A combined diff counts: [`parse`] rejects it by name, which is a better answer than "no diff
+/// markers found". Its `---`/`+++` pair is omitted for a file resolved the same way in both
+/// parents, so the ordinary markers do not always appear in one.
+pub fn looks_like_a_diff(input: &[u8]) -> bool {
+    const MARKERS: [&[u8]; 5] = [b"diff --git ", b"--- ", b"+++ ", b"@@ ", b"Binary files "];
+    input
+        .split(|&b| b == b'\n')
+        .any(|line| MARKERS.iter().any(|m| line.starts_with(m)) || is_combined_marker(line))
+}
+
 /// Whether the line marks a combined diff: the header git writes for a merge (`diff --cc`,
 /// `diff --combined`) or its hunk header, which has one `@` per side plus one (`@@@ -1,3 -1,3
 /// +1,3 @@@` for two parents).
-pub fn is_combined_marker(line: &[u8]) -> bool {
+fn is_combined_marker(line: &[u8]) -> bool {
     line.starts_with(b"diff --cc ")
         || line.starts_with(b"diff --combined ")
         || line.starts_with(b"@@@")

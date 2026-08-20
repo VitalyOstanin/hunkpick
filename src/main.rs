@@ -184,19 +184,6 @@ fn utf16_or_32_bom(input: &[u8]) -> Option<&'static str> {
 /// input instead would misjudge a diff whose later content is not ASCII.
 const UTF16_SNIFF_BYTES: usize = 256;
 
-/// Whether the input has a line that opens a diff. Shared by the non-diff guard and by the
-/// UTF-16 sniffer, so both agree on what counts as a diff.
-fn has_diff_marker(input: &[u8]) -> bool {
-    const MARKERS: [&[u8]; 5] = [b"diff --git ", b"--- ", b"+++ ", b"@@ ", b"Binary files "];
-    // A combined diff counts as a marker here so the parser gets to reject it by name. Its
-    // `---`/`+++` pair is omitted for a file resolved the same way in both parents, and without
-    // this the guard would report "no diff markers found" — which points at the pipe rather
-    // than at the format.
-    input.split(|&b| b == b'\n').any(|line| {
-        MARKERS.iter().any(|m| line.starts_with(m)) || hunkpick::parser::is_combined_marker(line)
-    })
-}
-
 /// The encoding of a UTF-16 stream that carries no byte-order mark, when the input looks like
 /// one: every other opening byte is NUL and the rest spell ASCII text with a diff marker.
 /// `iconv -t UTF-16LE` and `UnicodeEncoding($false, $false)` write exactly that, and without
@@ -219,7 +206,7 @@ fn utf16_without_bom(input: &[u8]) -> Option<&'static str> {
         let is_ascii_text = text
             .iter()
             .all(|&b| matches!(b, b'\t' | b'\n' | b'\r' | 0x20..=0x7E));
-        if is_ascii_text && has_diff_marker(&text) {
+        if is_ascii_text && parser::looks_like_a_diff(&text) {
             return Some(encoding);
         }
     }
@@ -255,7 +242,7 @@ fn reject_non_diff(input: &[u8]) -> Result<(), AppError> {
             "binary input: NUL byte found, expected a unified diff".into(),
         ));
     }
-    if !has_diff_marker(input) {
+    if !parser::looks_like_a_diff(input) {
         return Err(AppError::Usage(
             "input does not look like a unified diff (no diff markers found)".into(),
         ));

@@ -133,6 +133,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the new `SplitError::NotATextEntry` and `SplitError::OutOfBounds`. The CLI resolves addresses
   before it splits, so this only concerns a direct library caller; adding the two variants is a
   breaking change for a caller that matches `SplitError` exhaustively.
+- **Library API.** `cli` and `gitenv` are `#[doc(hidden)]`: service modules the binary and the
+  test crates need (neither can see a `pub(crate)` item), not a contract anyone should build on.
+  The `cargo semver-checks` gate added in 0.8.1 counts a new CLI flag as a new public field of an
+  exhaustively constructible struct, so without this every release that adds a flag would have to
+  be a minor one on account of a type no library user calls. `parser::is_combined_marker`, made
+  public in 0.8.1 for a guard in the binary, is private again; the guard itself moved into the
+  library as `parser::looks_like_a_diff`, so the list of lines that open a diff lives next to the
+  code that reads them.
 - **Library API.** `gitenv` gained `feed_and_wait`, `FeedError`, `insulate_config` and the two
   file-name constants it uses. Additions only; nothing existing changed shape.
 - **Library API.** `validate::GitCheckError::Spawn` carries the working directory alongside the

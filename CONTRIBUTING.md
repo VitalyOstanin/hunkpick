@@ -44,6 +44,13 @@ and reports any incompatibility the version in `Cargo.toml` does not account for
 breaking change is allowed, provided the minor version goes up with it; that is what the check
 enforces, and CI gates on it.
 
+Two modules are outside that contract and marked `#[doc(hidden)]`: `cli`, the argument types
+clap derives the command line from, and `gitenv`, the git plumbing the tests share with the tool.
+The binary and the integration tests are separate crates and cannot see `pub(crate)` items, so
+`pub` is the only way to reach them — but a new CLI flag is a new public field, and without the
+attribute `cargo semver-checks` would call it a breaking change of the library. Add to them
+freely; anything else public is a promise.
+
 The versions of the tools CI installs (`cargo-nextest`, `cargo-about`, `cargo-fuzz`,
 `cargo-llvm-cov`, `cargo-semver-checks`) are pinned in the `tool:` inputs of
 `taiki-e/install-action` across [`ci.yml`](.github/workflows/ci.yml),
