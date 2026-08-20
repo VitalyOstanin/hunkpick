@@ -22,6 +22,22 @@ pub enum SplitError {
     /// invariant: from the CLI an empty `@L` set is already rejected earlier by the selector
     /// parser (`empty index set`), so this is only reachable by a direct library caller.
     NoChangedLinesSelected,
+    /// The addressed entry has no hunks to split: a binary patch, or a header-only entry such
+    /// as a pure rename. Like [`SplitError::NoChangedLinesSelected`], only a direct library
+    /// caller reaches it — the CLI resolves the address through `select::resolve_hunk`, which
+    /// rejects both first.
+    NotATextEntry,
+    /// The address names a file or a hunk the patch does not have. Carries the 0-based index
+    /// asked for and how many there are. Reachable only by a direct library caller, for the
+    /// same reason as above.
+    OutOfBounds {
+        /// What was addressed: `"file"` or `"hunk"`.
+        what: &'static str,
+        /// The 0-based index the caller asked for.
+        index: usize,
+        /// How many exist.
+        available: usize,
+    },
 }
 
 impl fmt::Display for SplitError {
@@ -38,6 +54,14 @@ impl fmt::Display for SplitError {
             SplitError::NoChangedLinesSelected => {
                 write!(f, "the selection references no changed lines")
             }
+            SplitError::NotATextEntry => {
+                write!(f, "the entry has no hunks to split")
+            }
+            SplitError::OutOfBounds {
+                what,
+                index,
+                available,
+            } => write!(f, "{what} index {index} is out of range (0..{available})"),
         }
     }
 }
@@ -128,17 +152,30 @@ pub fn split_hunk_at(h: &Hunk, new_line_cuts: &[u32]) -> Result<Vec<Hunk>, Split
 /// hunkpick, which checks hunk bodies and not the lines between them, still reports success.
 /// Lines recorded right after the split hunk follow its last piece.
 ///
-/// Returns how many pieces the hunk became. Errors exactly as [`split_hunk_at`]. Panics if the
-/// file is binary or `hi` is out of range; callers resolve the address first
-/// (`select::resolve_hunk`), which rejects both.
+/// Returns how many pieces the hunk became. Errors as [`split_hunk_at`] does, plus
+/// [`SplitError::NotATextEntry`] for a binary or header-only entry and
+/// [`SplitError::OutOfBounds`] for a hunk index the file does not have. The CLI resolves the
+/// address through `select::resolve_hunk` first, so from there neither is reachable; they are
+/// for the direct library caller, who has no such step.
+///
+/// Prefer [`split_patch_hunk`] when the whole patch is at hand: this function cannot see
+/// [`crate::model::Patch::no_trailing_newline`], and a cut that drops the tail of the last hunk
+/// invalidates it.
 pub fn split_file_hunk(
     f: &mut FileDiff,
     hi: usize,
     new_line_cuts: &[u32],
 ) -> Result<usize, SplitError> {
     let FileContent::Text(hunks) = &mut f.content else {
-        unreachable!("split_file_hunk is only called for text files");
+        return Err(SplitError::NotATextEntry);
     };
+    if hi >= hunks.len() {
+        return Err(SplitError::OutOfBounds {
+            what: "hunk",
+            index: hi,
+            available: hunks.len(),
+        });
+    }
     let pieces = split_hunk_at(&hunks[hi], new_line_cuts)?;
     let n = pieces.len();
     hunks.splice(hi..=hi, pieces);
@@ -152,6 +189,56 @@ pub fn split_file_hunk(
         }
     }
     Ok(n)
+}
+
+/// Split hunk `hi` of file `fi` and keep the patch's own trailing-newline flag honest.
+///
+/// [`split_file_hunk`] does the cut; what it cannot do is notice that the cut changed which line
+/// the diff ends on. A piece with no changes is dropped, so cutting the last hunk of the last
+/// file can leave the output ending before the input's last line — and
+/// [`Patch::no_trailing_newline`] then removes the newline from a line that is not the one it
+/// describes, truncating a line nobody asked to change. `git apply` reads the result as a
+/// corrupt patch, while the internal check, which compares counts, order and anchors rather than
+/// the bytes after the last hunk, reports success. This is the same rule
+/// [`crate::select::select`] applies when it builds its result.
+///
+/// Returns how many pieces the hunk became; errors as [`split_file_hunk`] does, plus
+/// [`SplitError::OutOfBounds`] for a file index the patch does not have.
+pub fn split_patch_hunk(
+    patch: &mut Patch,
+    fi: usize,
+    hi: usize,
+    new_line_cuts: &[u32],
+) -> Result<usize, SplitError> {
+    if fi >= patch.files.len() {
+        return Err(SplitError::OutOfBounds {
+            what: "file",
+            index: fi,
+            available: patch.files.len(),
+        });
+    }
+    // The flag is about one line of the input — its last — so only a cut of the last hunk of
+    // the last file can invalidate it. Remember which line that is before the cut.
+    let last_line_before = (fi + 1 == patch.files.len() && hi + 1 == patch.files[fi].hunk_count())
+        .then(|| last_body_line(&patch.files[fi].content).cloned())
+        .flatten();
+
+    let pieces = split_file_hunk(&mut patch.files[fi], hi, new_line_cuts)?;
+
+    if let Some(was) = last_line_before {
+        let still_there = last_body_line(&patch.files[fi].content) == Some(&was);
+        patch.no_trailing_newline &= still_there;
+    }
+    Ok(pieces)
+}
+
+/// The last body line of an entry's last hunk — the line the entry's rendered form ends on,
+/// unless a trailer follows it. `None` for a binary entry or one with no hunks.
+fn last_body_line(content: &FileContent) -> Option<&Line> {
+    match content {
+        FileContent::Text(hunks) => hunks.last()?.lines.last(),
+        FileContent::Binary(_) => None,
+    }
 }
 
 /// Emit a piece of `h` that realises only the selected changed lines. `selected` holds 1-based
@@ -848,5 +935,87 @@ diff --git a/f b/f
             slice_changed_lines(&h, &sel(&[])),
             Err(SplitError::NoChangedLinesSelected)
         );
+    }
+
+    /// A library caller has no `resolve_hunk` step in front of it, so the addresses it passes
+    /// have to be answered rather than trusted. These three used to be an `unreachable!` and two
+    /// out-of-range indexings — a panic where the neighbouring `NoChangedLinesSelected` already
+    /// established that the direct caller gets an error.
+    #[test]
+    fn an_address_the_patch_does_not_have_is_an_error_not_a_panic() {
+        const BINARY: &str = "\
+diff --git a/f b/f
+GIT binary patch
+literal 4
+Lc$_iAxSk1
+";
+        let mut p = parse(BINARY.as_bytes()).unwrap();
+        assert_eq!(
+            split_file_hunk(&mut p.files[0], 0, &[1]),
+            Err(SplitError::NotATextEntry)
+        );
+
+        let mut p = parse(TWO_CHANGES.as_bytes()).unwrap();
+        assert_eq!(
+            split_file_hunk(&mut p.files[0], 7, &[1]),
+            Err(SplitError::OutOfBounds {
+                what: "hunk",
+                index: 7,
+                available: 1
+            })
+        );
+        assert_eq!(
+            split_patch_hunk(&mut p, 3, 0, &[1]),
+            Err(SplitError::OutOfBounds {
+                what: "file",
+                index: 3,
+                available: 1
+            })
+        );
+    }
+
+    /// The trailing-newline rule of [`split_patch_hunk`], at the level it is decided: cutting
+    /// away the piece that held the input's last line means the result no longer ends there, so
+    /// the flag has to go. The CLI test `split_that_drops_the_tail_keeps_the_final_newline`
+    /// checks the same thing through the process; this one names the condition.
+    #[test]
+    fn a_cut_that_drops_the_tail_clears_the_trailing_newline_flag() {
+        // ` e` is the input's last line and carries no change, so the piece holding it is
+        // dropped: new-file lines are a=1 B=2 c=3 d=4 e=5, and the cut is at 3.
+        const NO_FINAL_NEWLINE: &str = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,5 +1,5 @@
+ a
+-b
++B
+ c
+ d
+ e";
+        let mut p = parse(NO_FINAL_NEWLINE.as_bytes()).unwrap();
+        assert!(p.no_trailing_newline, "the input ends mid-line");
+        split_patch_hunk(&mut p, 0, 0, &[3]).unwrap();
+        assert!(
+            !p.no_trailing_newline,
+            "the result ends on ` c`, not on the input's last line"
+        );
+
+        // The same cut where both pieces carry a change keeps the tail, so the flag stays.
+        const BOTH_PIECES_CHANGE: &str = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,5 +1,5 @@
+ a
+-b
++B
+ c
+-d
++D
+ e";
+        let mut p = parse(BOTH_PIECES_CHANGE.as_bytes()).unwrap();
+        split_patch_hunk(&mut p, 0, 0, &[3]).unwrap();
+        assert!(p.no_trailing_newline, "the result still ends on ` e`");
     }
 }

@@ -20,6 +20,10 @@ enum Edit {
     Insert,
     Delete,
     TwoBlocks,
+    /// A replacement followed by two context lines, so the hunk has a context line strictly
+    /// inside its trailing run. Cutting there leaves a last piece with no changes at all, which
+    /// `split` drops — the only generated shape where a cut moves where the diff ends.
+    TrailingContext,
     /// A replacement whose changed lines carry a fixed text rather than one derived from the
     /// line number. A content id hashes the path and the changed lines only, so two of these in
     /// one diff share an id — the shape `@id` collision handling exists for, and the one every
@@ -60,6 +64,7 @@ fn arb_shape() -> impl Strategy<Value = DiffShape> {
         Just(Edit::Delete),
         Just(Edit::TwoBlocks),
         Just(Edit::Repeated),
+        Just(Edit::TrailingContext),
     ];
     (
         2usize..24,
@@ -160,6 +165,20 @@ fn render(shape: &DiffShape) -> Vec<u8> {
                 vec![
                     (b' ', format!("line {start}")),
                     (b'-', format!("line {}", start + 1)),
+                ],
+            ),
+            // Two trailing context lines after the change: the first of them is a context line
+            // strictly inside the hunk, so `--at` can cut there and leave a piece with nothing
+            // in it but context.
+            Edit::TrailingContext => (
+                4,
+                4,
+                vec![
+                    (b' ', format!("line {start}")),
+                    (b'-', format!("line {}", start + 1)),
+                    (b'+', format!("changed {}", start + 1)),
+                    (b' ', format!("line {}", start + 2)),
+                    (b' ', format!("line {}", start + 3)),
                 ],
             ),
             // Changed lines that do not mention `start`, so two of these hash to the same
@@ -383,6 +402,51 @@ proptest! {
         prop_assert_eq!(&again, &out);
     }
 
+    /// A diff that arrived without its final newline may be re-emitted that way only while the
+    /// result still ends on the line the input ended on. Cutting a hunk can drop the piece that
+    /// carried the tail, and then removing the newline truncates a line the caller never
+    /// addressed — `git apply` calls the result a corrupt patch, and hunkpick's own check,
+    /// which does not look past the last hunk, does not.
+    #[test]
+    fn splitting_drops_the_final_newline_only_where_the_input_ended(shape in arb_signed_shape()) {
+        let mut shape = shape;
+        shape.signature = false;
+        shape.no_trailing_newline = true;
+        let src = render(&shape);
+        prop_assume!(!src.ends_with(b"\n"));
+        let patch = parser::parse(&src).expect("generated diffs are well formed");
+        let FileContent::Text(hunks) = &patch.files[0].content else {
+            unreachable!("the generator writes text files")
+        };
+        // The last splittable hunk, not the first: only a cut of the last hunk can move where
+        // the diff ends, which is the whole point of the rule under test.
+        let Some((hi, cut)) = hunks
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, h)| last_interior_context_line(h).map(|c| (i, c)))
+        else {
+            return Ok(());
+        };
+
+        let mut out = patch.clone();
+        split::split_patch_hunk(&mut out, 0, hi, &[cut]).expect("a cut at an interior context line");
+        let text = emit::emit(&out);
+        prop_assume!(!text.is_empty());
+        if !text.ends_with(b"\n") {
+            // The output ends mid-line, so that line has to be the one the input ended on.
+            let last_line = match text.iter().rposition(|&b| b == b'\n') {
+                Some(i) => &text[i + 1..],
+                None => &text[..],
+            };
+            prop_assert!(
+                src.ends_with(last_line),
+                "the output ends on {:?}, which is not where the input ended",
+                String::from_utf8_lossy(last_line)
+            );
+        }
+    }
+
     /// Selecting every sub-hunk keeps every change of the input: the same added and deleted
     /// line counts come out. Auto-splitting may redraw the hunk boundaries, but it may not
     /// lose or invent a line.
@@ -412,6 +476,27 @@ fn change_counts(patch: &Patch) -> (u32, u32) {
         }
     }
     (added, deleted)
+}
+
+/// The last new-file line number of a context line strictly inside the hunk. Cutting there
+/// leaves the smallest possible tail piece, which is what drops when it holds no change.
+fn last_interior_context_line(h: &hunkpick::model::Hunk) -> Option<u32> {
+    let mut new_no = h.new_start;
+    let last = h.lines.len() - 1;
+    let mut found = None;
+    for (i, l) in h.lines.iter().enumerate() {
+        match l.kind {
+            LineKind::Del => continue,
+            LineKind::Context | LineKind::Add => {
+                let here = new_no;
+                new_no += 1;
+                if i > 0 && i < last && matches!(l.kind, LineKind::Context) {
+                    found = Some(here);
+                }
+            }
+        }
+    }
+    found
 }
 
 /// A shape that carries the signature and, in front of its own edits, a two-block hunk — the

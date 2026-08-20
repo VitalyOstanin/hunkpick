@@ -87,9 +87,10 @@ fn run_split(
         return Ok(());
     };
     let (fi, hi) = select::resolve_hunk(&patch, hunk).map_err(usage)?;
-    // `resolve_hunk` already rejected binary files, so the target is always text. The splice
-    // and the trailer bookkeeping it forces live together in `split_file_hunk`.
-    split::split_file_hunk(&mut patch.files[fi], hi, at).map_err(usage)?;
+    // `resolve_hunk` already rejected binary files, so the target is always text. The splice,
+    // the trailer bookkeeping it forces and the trailing-newline rule live together in
+    // `split_patch_hunk` — the last of the three needs the whole patch, not one file entry.
+    split::split_patch_hunk(&mut patch, fi, hi, at).map_err(usage)?;
     // Same rule as `select`: the result owns its new-side anchors. A diff carved out
     // of a larger one keeps anchors describing a file this result does not produce,
     // and `git apply` searches from the new-side position (see `renumber`).

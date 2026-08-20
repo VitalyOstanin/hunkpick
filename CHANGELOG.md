@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `1-1048576` — 2.6 KB of arguments against a four-sub-hunk diff — reached 1.6 GB of RSS before
   any index was compared against the diff. The cap is now one allowance for the whole
   invocation, and its message says so.
+- `split` now applies the same trailing-newline rule as `select`. A diff that arrived without
+  its final newline keeps that property only while the result still ends on the line the input
+  ended on, and a cut that drops the piece holding the tail does not: `hunkpick split 1 --at 3`
+  on such a diff ended its output mid-line at exit 0, and `git apply` called the result a
+  corrupt patch. `select` was taught this in 0.8.1; `split` was not.
 - The defect a scheduled fuzzing run found — a hunk header declaring six old lines over a body
   of three, whose selection then failed the tool's own output check — was closed by making the
   fuzz target skip such input, and nothing recorded it afterwards. The precondition is now
@@ -91,6 +96,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a stream, and "binary input: NUL byte found" sent the reader looking for a binary file in the
   pipeline rather than at the encoding of their own patch. The diff is still not re-encoded
   (ADR 0005) — the message says what to run.
+- **Library API.** `split::split_patch_hunk` is the entry point for splitting a hunk of a whole
+  patch: it does what `split_file_hunk` does and additionally keeps `Patch::no_trailing_newline`
+  honest, which a function taking one `FileDiff` cannot. `split_file_hunk` no longer panics on an
+  address the patch does not have — a binary entry, or a hunk index past the end — but returns
+  the new `SplitError::NotATextEntry` and `SplitError::OutOfBounds`. The CLI resolves addresses
+  before it splits, so this only concerns a direct library caller; adding the two variants is a
+  breaking change for a caller that matches `SplitError` exhaustively.
 - The MSRV gate now builds on the minimum supported version it names. `rust-toolchain.toml`
   pins the repository to `stable`, and a toolchain file wins over an installed default, so both
   the CI job and the release job that `publish` waits on compiled on stable and reported success

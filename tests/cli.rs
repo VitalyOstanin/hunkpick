@@ -505,6 +505,107 @@ diff --git a/f b/f
     common::apply_cached(&dir, out.as_bytes());
 }
 
+/// A diff that arrived without its final newline keeps that property only when the result still
+/// ends on the same line. `select` was taught this; `split` was not, and a cut that drops the
+/// trailing context ends the output on a line that is not the input's last — with its newline
+/// removed, so the line is truncated. hunkpick's own check does not see it (it compares counts,
+/// order and anchors, not the bytes after the last hunk) and exits 0, while `git apply` reads
+/// the result as a corrupt patch.
+#[test]
+fn split_that_drops_the_tail_keeps_the_final_newline() {
+    // No newline after ` e`: the input ends mid-line, and ` e` is the line it ends on.
+    let diff = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,5 +1,5 @@
+ a
+-b
++B
+ c
+ d
+ e";
+    // New-file line numbers: a=1 B=2 c=3 d=4 e=5. Cutting at context line 3 leaves one piece
+    // with changes; the piece holding ` d` and ` e` has none and is dropped, so the output no
+    // longer reaches the input's last line.
+    let out = common::run_ok(&["split", "1", "--at", "3"], diff);
+    assert!(
+        !out.ends_with(b" e"),
+        "the tail was dropped, so the output cannot end on the input's last line"
+    );
+    assert_eq!(
+        out.last(),
+        Some(&b'\n'),
+        "the output ends on a different line, so it keeps its newline: {}",
+        String::from_utf8_lossy(&out)
+    );
+}
+
+/// The other half of the same rule: when the cut keeps the input's last line, the missing final
+/// newline is the input's own and has to be reproduced. Dropping the newline is byte-for-byte
+/// fidelity here, not truncation.
+#[test]
+fn split_that_keeps_the_tail_reproduces_the_missing_newline() {
+    // Two changes, one on either side of the cut, so both pieces survive and the last piece
+    // carries ` e` — the line the input ends on.
+    let diff = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,5 +1,5 @@
+ a
+-b
++B
+ c
+-d
++D
+ e";
+    let out = common::run_ok(&["split", "1", "--at", "3"], diff);
+    assert!(
+        out.ends_with(b" e"),
+        "both pieces survive, so the output reaches the input's last line: {}",
+        String::from_utf8_lossy(&out)
+    );
+}
+
+/// The mirror-image decision on the `select` side, recorded rather than changed: an `@L` cut of
+/// the last sub-hunk is treated as not reaching the input's last line even when it keeps it, so
+/// the missing final newline is not reproduced and the output gets one. The error leans the safe
+/// way — an extra newline makes the result more applicable, not less — but it is a deliberate
+/// approximation of `emit`'s byte-for-byte promise, and a test is what tells the next reader that.
+#[test]
+fn a_line_slice_of_the_last_sub_hunk_gets_a_final_newline_it_did_not_have() {
+    // Two hunks, the input ending mid-line on ` r`. `2@L1` keeps that context line.
+    let diff = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,3 +1,3 @@
+ p
+-q
++Q
+ r
+@@ -10,3 +10,3 @@
+ p
+-q
++Q
+ r";
+    let out = common::run_ok(&["select", "2@L1"], diff);
+    assert!(
+        out.ends_with(b" r\n"),
+        "an @L pick is not credited with reaching the last line: {}",
+        String::from_utf8_lossy(&out)
+    );
+
+    // Taking the same sub-hunk whole is credited, and the input's own ending is reproduced.
+    let whole = common::run_ok(&["select", "2"], diff);
+    assert!(
+        whole.ends_with(b" r"),
+        "a whole pick of the last sub-hunk ends where the input did: {}",
+        String::from_utf8_lossy(&whole)
+    );
+}
+
 /// Re-emitting a diff whose every hunk is followed by a line must stay linear in the number of
 /// hunks. Scanning the whole trailer per hunk made it quadratic, and the cost is invisible on a
 /// small diff: it shows only at scale. Measured as a ratio between two sizes rather than against
