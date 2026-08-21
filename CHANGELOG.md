@@ -256,6 +256,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field is public. `emit` now orders what it is given, stably, and only when the one linear scan
   that decides says it has to.
 
+- The same measurement is written the same way in both places that carry it. `src/emit.rs` and
+  the 0.8.0 entry below disagreed on the size of the diff behind the trailer timing — 9 MB
+  against 7 MB — and a reader cannot tell which run the number came from when it comes in two
+  sizes; the code comment, written next to the measurement, keeps its figure. The three decimal
+  commas among them are points, like every other number in the project.
+- One statement of why the fuzzing commands are spelled the way they are. The explanation of
+  the target triple stood in `CONTRIBUTING.md`, in `ci.yml` and in both fuzz scripts; the
+  satellites now point at the section that explains all four unobvious parts of the command,
+  because four copies of a reason drift into four different reasons.
+- The shell scripts are checked, not just written. Seven of them carry release-critical logic —
+  packaging, archive verification, the changelog and tag checks — and nothing looked at them:
+  CI now runs `shellcheck scripts/*.sh` (preinstalled on the runner, clean today), and a test
+  holds them to the four-space indent `.editorconfig` asks for, which shellcheck has no opinion
+  about.
+
 ### Changed
 
 - A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being
@@ -359,8 +374,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git apply` rejected the result (`patch fragment without header`) while hunkpick exited 0.
   Each line now follows the hunk it followed before the split.
 - Emitting those lines rescanned the whole list for every hunk, which is quadratic in their
-  number: a 7 MB diff carrying a separator after each of its 128 000 hunks took 15 s to
-  re-emit, against 0,2 s to list. One pass now walks the list alongside the hunks (0,18 s on
+  number: a 9 MB diff carrying a separator after each of its 128 000 hunks took 15 s to
+  re-emit, against 0.2 s to list. One pass now walks the list alongside the hunks (0.18 s on
   the same input).
 - A binary file, a pure rename and a mode-only change have no `---`/`+++` lines, so they
   had no path and could not be addressed in a multi-file diff. Their paths are now read

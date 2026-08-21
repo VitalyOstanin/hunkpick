@@ -39,6 +39,12 @@ jobs:
         run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
       - name: Docs
         run: cargo doc --no-deps
+      # Six shell scripts carry release-critical logic (packaging, archive verification, the
+      # changelog and tag checks), and nothing was checking them. shellcheck is preinstalled on
+      # the runner image, so this costs a second. It is a gate rather than a suggestion: the
+      # scripts are clean today, and the point is to keep the next unquoted expansion out.
+      - name: Shellcheck
+        run: shellcheck scripts/*.sh
       # A licence gate, not just a document generator: cargo-about fails on any crate whose
       # licence is outside the `accepted` list in about.toml, so a new dependency under an
       # incompatible licence breaks the pull request instead of the release.
@@ -199,10 +205,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/fuzz-setup
-      # The target triple is spelled out because cargo-fuzz defaults to the triple it was itself
-      # built for, and the prebuilt binary is a static musl build. ASan cannot work against a
-      # statically linked libc, so that default fails with
-      # "sanitizer is incompatible with statically linked libc".
+      # The target triple is spelled out on purpose; CONTRIBUTING.md, section "Fuzzing", says
+      # why, along with the other three parts of a cargo-fuzz command that are not obvious.
       #
       # No target list here: `cargo fuzz build` builds every target the crate declares, so adding
       # one to fuzz/Cargo.toml does not need a matching edit in this file.

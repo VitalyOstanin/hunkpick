@@ -125,3 +125,51 @@ fn every_edge_corpus_test_is_introduced_by_a_banner_naming_it() {
         "every test needs a banner naming it, and every banner a test of that name"
     );
 }
+
+/// `.editorconfig` asks shell scripts to indent by four spaces, and until now that was a
+/// request an editor might honour rather than a rule. shellcheck, added to CI in the same
+/// cycle, does not close this: it reads a script for what it does, not for how it is laid out.
+/// The scripts carry release-critical logic, so a diff of one should show the change and not
+/// a re-indentation around it.
+#[test]
+fn every_shell_script_indents_by_four_spaces() {
+    let dir = repo().join("scripts");
+    let mut scripts = Vec::new();
+    files(&dir, &["sh"], &mut scripts);
+    if scripts.is_empty() {
+        // scripts/ is excluded from the published crate; a run from a crates.io tarball
+        // has nothing to check here.
+        return;
+    }
+    scripts.sort();
+
+    let mut offenders = Vec::new();
+    for path in &scripts {
+        let text = std::fs::read_to_string(path).expect("a readable script");
+        for (i, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+            let reason = if line[..indent].contains('\t') {
+                "a tab"
+            } else if indent % 4 != 0 {
+                "an indent that is not a multiple of four"
+            } else {
+                continue;
+            };
+            offenders.push(format!(
+                "{}:{}: {reason}",
+                path.strip_prefix(repo()).unwrap_or(path).display(),
+                i + 1
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "{} line(s) disagree with the four-space indent .editorconfig sets for *.sh:\n{}",
+        offenders.len(),
+        offenders.join("\n")
+    );
+}

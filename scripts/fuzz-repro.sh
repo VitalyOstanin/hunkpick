@@ -8,9 +8,9 @@
 # used. The first failure stops the run, which is the point -- the input that
 # still crashes is the one to look at.
 #
-# RUSTUP_TOOLCHAIN and the spelled-out triple are needed for the same reasons as
-# in fuzz-all.sh: rust-toolchain.toml pins the repository to stable, and
-# cargo-fuzz otherwise builds for the triple it was itself built for.
+# RUSTUP_TOOLCHAIN and the spelled-out triple are needed here for the reasons
+# CONTRIBUTING.md gives in its "Fuzzing" section, the same ones fuzz-all.sh runs
+# under.
 set -uo pipefail
 
 TRIPLE="${FUZZ_TRIPLE:-x86_64-unknown-linux-gnu}"

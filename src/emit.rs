@@ -18,7 +18,7 @@ pub fn emit(patch: &Patch) -> Vec<u8> {
         // The cursor below walks the trailer once alongside the hunks, which needs the entries
         // ordered by the hunk they follow. Rescanning the whole list for every hunk was
         // quadratic in their number: a 9 MB diff carrying a separator after each of its 128 000
-        // hunks took 15 s to re-emit, against 0,2 s to list.
+        // hunks took 15 s to re-emit, against 0.2 s to list.
         //
         // Everything in this crate builds the list in order, but `trailer` is a public field:
         // a caller assembling a FileDiff by hand can hand over its lines in any order, and the

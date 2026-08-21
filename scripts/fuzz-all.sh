@@ -8,18 +8,11 @@
 # Needs a nightly toolchain and cargo-fuzz: the sanitizer coverage libFuzzer
 # steers by is a nightly flag.
 #
-# RUSTUP_TOOLCHAIN, not `cargo +nightly`: rust-toolchain.toml pins the whole
-# repository to stable, and a toolchain file wins over the toolchain named on
-# the command line for the crate it covers. Without the override cargo-fuzz
-# hands the build to stable rustc, which rejects the -Z sanitizer flags.
-#
-# mkdir first, because the corpus is gitignored: a tree that has never fuzzed
-# locally does not carry it, and libFuzzer refuses to start when the writable
-# corpus directory is missing.
-#
-# The target triple is spelled out because cargo-fuzz otherwise builds for the
-# triple it was itself built for, and a statically linked libc cannot carry
-# AddressSanitizer.
+# Four parts of the command below are not obvious and each costs a confusing
+# failure on its own: RUSTUP_TOOLCHAIN rather than `cargo +nightly`, the
+# spelled-out target triple, the mkdir before the run, and -timeout. The reason
+# for each is in CONTRIBUTING.md, section "Fuzzing" -- stated once, because
+# four copies of a reason drift into four different reasons.
 #
 # A crash leaves its input in fuzz/artifacts/, which does not always travel
 # back from wherever the run happened -- a crash is by definition the run that

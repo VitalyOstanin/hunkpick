@@ -58,7 +58,8 @@ same version for the `hunkpick` package, and `CHANGELOG.md` has a `## [X.Y.Z]` s
    silently as the toolchain SHAs above:
 
    ```sh
-   grep -ho 'cargo-[a-z-]*@[0-9.]*' .github/workflows/*.yml | tr ',' '\n' | sort -u |
+   grep -ho 'cargo-[a-z-]*@[0-9.]*' .github/workflows/*.yml .github/actions/*/action.yml |
+     tr ',' '\n' | sort -u |
      while IFS='@' read -r crate pinned; do
        latest=$(curl -sS -H 'User-Agent: hunkpick-release-check' \
          "https://crates.io/api/v1/crates/$crate" | jq -r '.crate.max_stable_version')
