@@ -26,12 +26,16 @@ Jobs run in this order; everything reversible happens before the one step that i
 | 3 | `lint`             | `clippy -D warnings`, `cargo fmt --check`, docs build                           |
 | 4 | `msrv`             | `cargo check --locked --all-targets` on the minimum supported Rust version      |
 | 5 | `semver`           | `cargo semver-checks check-release`: the public API against the released version |
-| 6 | `package-binaries` | Builds each target, generates the notices, packs and verifies every archive, and attests its provenance |
-| 7 | `publish`          | `cargo publish --locked`, then creates the GitHub Release from the changelog    |
-| 8 | `upload-assets`    | Attaches the archives (built in step 6) to that Release                         |
+| 6 | `notices`          | Generates `THIRD-PARTY-NOTICES.md` once for every archive and hands it on as an artifact |
+| 7 | `package-binaries` | Builds each target, packs and verifies every archive, and attests its provenance |
+| 8 | `publish`          | `cargo publish --locked`, then creates the GitHub Release from the changelog    |
+| 9 | `upload-assets`    | Attaches the archives (built in step 7) to that Release                         |
 
-Steps 2 to 5 run in parallel; `package-binaries` waits on 1 to 4, and `publish` on everything
-before it. The tests, lints and gates duplicate CI on purpose: the workflow is triggered by a tag
+Steps 2 to 6 run in parallel; `package-binaries` waits on 1 to 4 and on 6, and `publish` on
+everything before it. The notices are generated once rather than per archive because
+[`about.toml`](about.toml) names every release target, so the file does not depend on the host
+that produced it — and one copy is the only way to be sure the four archives carry the same
+notices. The tests, lints and gates duplicate CI on purpose: the workflow is triggered by a tag
 push, so a green run on `master` says nothing about the commit being released.
 
 Consistency checks inside `verify-metadata`: the tag matches
@@ -154,9 +158,9 @@ job; the run then pauses before the one irreversible step.
 
 ## If something fails
 
-- **Before `publish`** (jobs 1–6): nothing is public. Fix the problem on `master`, delete the
+- **Before `publish`** (jobs 1–7): nothing is public. Fix the problem on `master`, delete the
   tag locally and remotely (`git push origin :refs/tags/vX.Y.Z`), and re-tag the new commit.
-- **After `publish`** (jobs 7–8): the crates.io version is permanent. A failed
+- **After `publish`** (jobs 8–9): the crates.io version is permanent. A failed
   `upload-assets` can simply be re-run — the upload is idempotent (`--clobber`), and the
   archives are kept as workflow artifacts for 7 days. If the published version itself is
   broken, `cargo yank --version X.Y.Z` stops new dependents from picking it up, and the fix

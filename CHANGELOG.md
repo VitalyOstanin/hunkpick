@@ -249,7 +249,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   up nowhere: `verify-archive.sh` now requires licence sections naming the crates they cover and
   the licence texts themselves, and `package-archive.sh` refuses a notices file older than
   `Cargo.lock`, which is the shape a hand-packed archive takes when the file was left over from
-  an earlier dependency set.
+  an earlier dependency set. It is also generated once for the whole release rather than once
+  per archive: `about.toml` names every release target, so the file does not depend on the host
+  that produced it, and one copy is the only way to be sure the four archives agree.
 
 - Trailing lines are placed by their tag even when they arrive out of order. `FileDiff::trailer`
   pairs each line with the number of hunks before it, and emitting walks the list once, which
