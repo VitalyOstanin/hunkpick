@@ -44,7 +44,7 @@ jobs:
       # incompatible licence breaks the pull request instead of the release.
       - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
         with:
-          tool: cargo-about@0.9.1
+          tool: cargo-about@0.9.2
       - name: Third-party licences
         run: bash scripts/generate-notices.sh
 
@@ -94,6 +94,9 @@ jobs:
           name: proptest-regressions-${{ matrix.os }}
           path: proptest-regressions/
           if-no-files-found: ignore
+          # Same reasoning as the crashing inputs in fuzz.yml: the seed that produced the
+          # counterexample lives only on the runner, and a re-run draws a new one.
+          retention-days: 90
 
   coverage:
     name: Coverage

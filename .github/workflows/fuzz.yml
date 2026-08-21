@@ -125,3 +125,7 @@ jobs:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts/
           if-no-files-found: ignore
+          # Longer than the seven days a release archive gets: that one is a hand-off between
+          # two jobs of the same run, this one is the only copy of an input a scheduled search
+          # found, and the search runs whether or not anybody is looking that week.
+          retention-days: 90

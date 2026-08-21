@@ -219,6 +219,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compares the set of banners with the set of `#[test]` functions, which a comment asking for the
   convention could not.
 
+- The CI tool pins have a way to be noticed. `taiki-e/install-action` is pinned by SHA and
+  Dependabot bumps it weekly, but the five `tool: <crate>@<version>` values it is handed name a
+  crates.io version inside a `with:` value, which no ecosystem reads — the action's version says
+  nothing about the version of what it installs, and the cargo ecosystem is off by design. They
+  had the same standing as the `dtolnay/rust-toolchain` SHAs, which RELEASING.md already refreshes
+  by hand, and now they are refreshed alongside them, with the command that names the stale ones.
+  `cargo-about` was one minor behind (0.9.1 against 0.9.2) and is up to date.
+- Every artifact upload states how long it is kept. A release archive keeps its seven days — it
+  is a hand-off between two jobs of one run, and `upload-assets` attaches it to the Release
+  afterwards — while a fuzzer's crashing input and a property-test counterexample now say 90
+  rather than inheriting it: each is the only copy of an input found by a run nobody was watching.
+
 ### Changed
 
 - A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being

@@ -4,6 +4,13 @@
 # covered by the scheduled cargo audit (.github/workflows/audit.yml), and
 # routine crate bumps are reviewed manually to avoid a churn of per-crate
 # PRs. Only the github-actions ecosystem is configured.
+#
+# Two classes of pin sit outside every ecosystem and are refreshed by hand at
+# release time (see RELEASING.md): the dtolnay/rust-toolchain refs below, and
+# the `tool: <crate>@<version>` values handed to taiki-e/install-action. The
+# latter name a crates.io version inside a `with:` value, which the
+# github-actions ecosystem does not read -- bumping the action says nothing
+# about the version of what it installs.
 version: 2
 updates:
   - package-ecosystem: "github-actions"

@@ -51,9 +51,26 @@ same version for the `hunkpick` package, and `CHANGELOG.md` has a `## [X.Y.Z]` s
    ```
 
    Update `.github/workflows/{ci,release}.yml` if either differs from what is pinned there.
-2. Make sure `master` is green and up to date with `origin`.
-3. Bump `version` in [`Cargo.toml`](Cargo.toml).
-4. Refresh the lock entry in both workspaces so each carries the new version. The fuzz
+2. Refresh the cargo tool pins. `taiki-e/install-action` is pinned by SHA and Dependabot bumps
+   it, but the tools it installs are named in a `with:` value (`tool: cargo-nextest@0.9.143`),
+   which no ecosystem of `dependabot.yml` reads: the action's own version says nothing about
+   the version of what it fetches, and the cargo ecosystem is off by design. They drift as
+   silently as the toolchain SHAs above:
+
+   ```sh
+   grep -ho 'cargo-[a-z-]*@[0-9.]*' .github/workflows/*.yml | tr ',' '\n' | sort -u |
+     while IFS='@' read -r crate pinned; do
+       latest=$(curl -sS -H 'User-Agent: hunkpick-release-check' \
+         "https://crates.io/api/v1/crates/$crate" | jq -r '.crate.max_stable_version')
+       [ "$pinned" = "$latest" ] || echo "$crate: pinned $pinned, latest $latest"
+     done
+   ```
+
+   Read the release notes of anything it names before bumping it: these tools gate the release,
+   so a behaviour change in one of them shows up as a failed release run.
+3. Make sure `master` is green and up to date with `origin`.
+4. Bump `version` in [`Cargo.toml`](Cargo.toml).
+5. Refresh the lock entry in both workspaces so each carries the new version. The fuzz
    workspace has its own lock, and leaving it behind makes every cargo command in `fuzz/`
    rewrite it later:
 
@@ -62,11 +79,11 @@ same version for the `hunkpick` package, and `CHANGELOG.md` has a `## [X.Y.Z]` s
    (cd fuzz && cargo update -p hunkpick)
    ```
 
-5. In [`CHANGELOG.md`](CHANGELOG.md), turn the `## [Unreleased]` section into
+6. In [`CHANGELOG.md`](CHANGELOG.md), turn the `## [Unreleased]` section into
    `## [X.Y.Z] - YYYY-MM-DD` (ASCII hyphen, ISO date) and add a fresh empty `Unreleased`
    section above it. Add the new version to the table of contents at the top; the file has no
    link definitions at the bottom — its entries link to the heading anchors.
-6. Verify locally:
+7. Verify locally:
 
    ```sh
    cargo t && cargo t-doc                                      # tests
@@ -78,13 +95,13 @@ same version for the `hunkpick` package, and `CHANGELOG.md` has a `## [X.Y.Z]` s
    cargo publish --dry-run --locked                            # package contents
    ```
 
-   The semver check is run here, after step 3 raised the version: it compares this tree against
+   The semver check is run here, after step 4 raised the version: it compares this tree against
    the last version on crates.io and passes only if the number covers what the API did. Running
    it before the bump reports the change against the version it is replacing. The full local
    loop, including the two commands that lint the `fuzz` workspace, is in
    [CONTRIBUTING.md](CONTRIBUTING.md).
 
-7. Commit as `chore(release): X.Y.Z` and push to `master`.
+8. Commit as `chore(release): X.Y.Z` and push to `master`.
 
 ## Rehearsing with a dry run
 

@@ -407,7 +407,7 @@ jobs:
       # contract (scripts/verify-archive.sh enforces its presence).
       - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
         with:
-          tool: cargo-about@0.9.1
+          tool: cargo-about@0.9.2
       - name: Generate third-party notices
         shell: bash
         run: bash scripts/generate-notices.sh
@@ -448,6 +448,8 @@ jobs:
             ${{ steps.pack.outputs.asset }}
             ${{ steps.pack.outputs.asset }}.sha256
           if-no-files-found: error
+          # A hand-off between two jobs of the same run, not a record: `upload-assets` attaches
+          # it to the Release, which is where it is kept from then on.
           retention-days: 7
 
   # Attach the already-verified archives to the Release `publish` created. Last step of the
