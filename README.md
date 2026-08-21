@@ -101,6 +101,12 @@ cargo binstall hunkpick
 
 Prebuilt binaries are published for `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`. On other targets `cargo binstall` falls back to a source build.
 
+Every archive on the [releases page](https://github.com/VitalyOstanin/hunkpick/releases) carries a `.sha256` companion and a build provenance attestation. The checksum says the download arrived intact; the attestation says which workflow run, at which commit of this repository, produced those exact bytes — which the checksum cannot, since it is served from the same page as the archive:
+
+```sh
+gh attestation verify hunkpick-<version>-x86_64-unknown-linux-gnu.tar.gz --repo VitalyOstanin/hunkpick
+```
+
 **From source:**
 
 ```sh

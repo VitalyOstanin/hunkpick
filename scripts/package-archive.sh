@@ -45,6 +45,16 @@ if [ ! -f "$NOTICES" ]; then
     echo "error: notices file not found at $NOTICES (run scripts/generate-notices.sh)" >&2
     exit 1
 fi
+# A stale notices file is worse than a missing one: it names an older dependency set, and
+# nothing in the tree says how old it is -- the file is gitignored, so it does not show up as
+# a modification either. Cargo.lock is what the list is derived from, so a notices file older
+# than the lock cannot describe it. In CI the two are minutes apart (the workflow generates
+# the notices right before packaging); this bites a hand-packed archive.
+if [ "$NOTICES" -ot Cargo.lock ]; then
+    echo "error: $NOTICES is older than Cargo.lock and describes an earlier dependency set" >&2
+    echo "  regenerate it: bash scripts/generate-notices.sh" >&2
+    exit 1
+fi
 if [ ! -d "$OUTPUT_DIR" ]; then
     echo "error: OUTPUT_DIR does not exist: $OUTPUT_DIR" >&2
     exit 1

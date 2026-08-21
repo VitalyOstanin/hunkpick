@@ -26,7 +26,7 @@ Jobs run in this order; everything reversible happens before the one step that i
 | 3 | `lint`             | `clippy -D warnings`, `cargo fmt --check`, docs build                           |
 | 4 | `msrv`             | `cargo check --locked --all-targets` on the minimum supported Rust version      |
 | 5 | `semver`           | `cargo semver-checks check-release`: the public API against the released version |
-| 6 | `package-binaries` | Builds each target, generates the notices, packs and verifies every archive     |
+| 6 | `package-binaries` | Builds each target, generates the notices, packs and verifies every archive, and attests its provenance |
 | 7 | `publish`          | `cargo publish --locked`, then creates the GitHub Release from the changelog    |
 | 8 | `upload-assets`    | Attaches the archives (built in step 6) to that Release                         |
 
@@ -136,6 +136,14 @@ The tag push starts the pipeline. Its first job, `Verify tag, manifest, locks an
 takes seconds and stops the run before anything is compiled if the tag, `Cargo.toml`, either
 lockfile or the CHANGELOG disagree. When the pipeline finishes, check that the Release carries one
 archive plus one `.sha256` per target and that `cargo binstall hunkpick` picks up the new version.
+Each archive is also attested, so the provenance is worth checking once on a real download:
+
+```sh
+gh attestation verify hunkpick-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz --repo VitalyOstanin/hunkpick
+```
+
+A rehearsal does not attest (nothing it builds ships), so this is the first run where the step
+executes at all.
 
 There is no approval step: pushing the tag publishes, with `CARGO_REGISTRY_TOKEN` read from the
 repository secrets. That is a deliberate trade — a mistaken tag burns a version number on

@@ -8,7 +8,8 @@
 #   2. Sibling .sha256 exists and `sha256sum -c` passes
 #   3. Archive extracts to a single top-level directory matching the stem
 #   4. That directory contains exactly: <bin_name>, README.md, LICENSE,
-#      THIRD-PARTY-NOTICES.md
+#      THIRD-PARTY-NOTICES.md, and the notices file carries licence sections
+#      rather than being an empty or truncated placeholder
 #   5. The packaged binary runs and reports the version in the filename
 #      (skipped, with a message, for an archive built for another host)
 
@@ -114,6 +115,19 @@ for f in "${required[@]}"; do
         exit 1
     fi
 done
+
+# The notices file has to carry notices. Checking only its presence passes a truncated or
+# placeholder copy, and this is the one file in the archive whose absence of content nobody
+# would notice: it is gitignored, generated, and read only when someone audits the licences.
+notices="${root}/THIRD-PARTY-NOTICES.md"
+if ! grep -q '^## ' "$notices" || ! grep -q 'Used by:' "$notices"; then
+    echo "error: THIRD-PARTY-NOTICES.md has no licence section naming the crates it covers" >&2
+    exit 1
+fi
+if [ "$(grep -c '^```' "$notices")" -lt 2 ]; then
+    echo "error: THIRD-PARTY-NOTICES.md carries no licence text" >&2
+    exit 1
+fi
 
 actual=()
 while IFS= read -r line; do

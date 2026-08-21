@@ -231,6 +231,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   afterwards — while a fuzzer's crashing input and a property-test counterexample now say 90
   rather than inheriting it: each is the only copy of an input found by a run nobody was watching.
 
+- A published archive can be traced back to the run that built it. Each one now carries a build
+  provenance attestation alongside its `.sha256`, verifiable with
+  `gh attestation verify <archive> --repo VitalyOstanin/hunkpick`. The checksum only says the
+  download arrived intact, and it is served from the same Release page as the archive, so
+  whoever could replace one could replace the other. Only a publishing run attests: a rehearsal
+  builds whatever branch the dialog names.
+- The `x86_64-apple-darwin` archive is built on an Intel runner (`macos-15-intel`) instead of
+  being cross-compiled on Apple Silicon. `verify-archive.sh` runs the packaged binary and checks
+  the version it reports, and it can only do that for an archive built for the host — so one of
+  the four published archives had never been executed by anything before it reached users.
+- The notices file inside an archive is checked for content, not just for presence.
+  `THIRD-PARTY-NOTICES.md` is generated and gitignored, so a truncated or placeholder copy shows
+  up nowhere: `verify-archive.sh` now requires licence sections naming the crates they cover and
+  the licence texts themselves, and `package-archive.sh` refuses a notices file older than
+  `Cargo.lock`, which is the shape a hand-packed archive takes when the file was left over from
+  an earlier dependency set.
+
 ### Changed
 
 - A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being

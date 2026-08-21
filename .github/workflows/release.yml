@@ -343,6 +343,11 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      # Both are for the provenance attestation at the end of the job: `id-token` to
+      # obtain the OIDC token Sigstore signs against, `attestations` to record the
+      # signed statement against this repository.
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -350,8 +355,11 @@ jobs:
         # (ubuntu-24.04) on purpose: linking against its older glibc yields a
         # binary that also runs on newer distributions, whereas building on
         # 26.04 would require a newer glibc at runtime. macos-latest is Apple
-        # Silicon; x86_64-apple-darwin is a cross-compile needing only
-        # `rustup target add`.
+        # Silicon; x86_64-apple-darwin is built on macos-15-intel, a standard
+        # runner of the same architecture, so that scripts/verify-archive.sh
+        # can run the packaged binary. Cross-compiling it on the Apple Silicon
+        # runner needed only `rustup target add`, but left one of the four
+        # published archives never executed by anything before release.
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
@@ -361,7 +369,7 @@ jobs:
             target: aarch64-apple-darwin
             archive: tar.gz
             binary: hunkpick
-          - os: macos-latest
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             archive: tar.gz
             binary: hunkpick
@@ -429,14 +437,33 @@ jobs:
 
       # Defends the archive contract: filename matches the template, sibling
       # .sha256 verifies cleanly, archive expands to a single top-level
-      # directory matching the stem containing exactly binary + README +
-      # LICENSE. Catches layout regressions before the asset reaches users.
+      # directory matching the stem containing exactly the binary, README.md,
+      # LICENSE and THIRD-PARTY-NOTICES.md, and the packaged binary runs and
+      # reports the version its filename claims. Catches layout regressions
+      # before the asset reaches users.
       - name: Verify archive against downstream contract
         shell: bash
         env:
           ASSET: ${{ steps.pack.outputs.asset }}
           BIN_NAME: ${{ matrix.binary }}
         run: bash scripts/verify-archive.sh "$ASSET" "$BIN_NAME"
+
+      # Provenance: a Sigstore-signed statement binding this archive to the workflow run,
+      # commit and repository that produced it, verifiable by anyone who downloads it:
+      #
+      #   gh attestation verify hunkpick-X.Y.Z-<target>.tar.gz --repo VitalyOstanin/hunkpick
+      #
+      # The .sha256 companion says the download arrived intact; it says nothing about where
+      # the bytes came from, and it is served from the same Release page as the archive, so
+      # whoever could replace one could replace the other. Attestations are free for public
+      # repositories. Only a run that publishes attests: a rehearsal builds an arbitrary
+      # branch, and a signed statement about an archive that never ships is noise in the log
+      # a verifier reads.
+      - name: Attest the archive's provenance
+        if: needs.verify-metadata.outputs.publish == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.pack.outputs.asset }}
 
       # Hand the verified archive to upload-assets. Keeping the upload in a separate job is
       # what lets this one run before `publish`.
