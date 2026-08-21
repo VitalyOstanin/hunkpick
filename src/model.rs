@@ -65,10 +65,12 @@ pub struct FileDiff {
     /// place. Kept apart from `headers` because emitting such a line up front moves it above
     /// the first `@@` and `git apply` then rejects the whole diff as garbage.
     ///
-    /// Ordered by that position, non-decreasing: the parser appends entries as it reads the
-    /// file, and [`crate::split::split_file_hunk`] shifts them monotonically. Emitting relies on
-    /// the order to walk the list once instead of rescanning it for every hunk, so a caller
-    /// building a `FileDiff` by hand keeps the entries in it.
+    /// Ordered by that position, non-decreasing, as this crate builds it: the parser appends
+    /// entries as it reads the file, and [`crate::split::split_file_hunk`] shifts them
+    /// monotonically. Emitting walks the list once instead of rescanning it for every hunk, so
+    /// it orders a list that arrives out of order before doing so — a caller assembling a
+    /// `FileDiff` by hand gets its lines placed by their tag either way, at the cost of one
+    /// sort. Entries sharing a position keep the order they were given.
     pub trailer: Vec<(usize, Vec<u8>)>,
     /// Old-side path with the `a/` prefix stripped and git quoting decoded; `None` until a
     /// `--- ` or `diff --git` line supplies it. Raw bytes, so a non-UTF-8 name round-trips.

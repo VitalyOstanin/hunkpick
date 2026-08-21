@@ -15,13 +15,27 @@ pub fn emit(patch: &Patch) -> Vec<u8> {
             out.extend_from_slice(h);
             out.push(b'\n');
         }
-        debug_assert!(
-            f.trailer.windows(2).all(|w| w[0].0 <= w[1].0),
-            "trailer entries must be ordered by the hunk they follow"
-        );
-        // One cursor walks the trailer alongside the hunks. Rescanning the whole list for every
-        // hunk was quadratic in their number: a 9 MB diff carrying a separator after each of its
-        // 128 000 hunks took 15 s to re-emit, against 0,2 s to list.
+        // The cursor below walks the trailer once alongside the hunks, which needs the entries
+        // ordered by the hunk they follow. Rescanning the whole list for every hunk was
+        // quadratic in their number: a 9 MB diff carrying a separator after each of its 128 000
+        // hunks took 15 s to re-emit, against 0,2 s to list.
+        //
+        // Everything in this crate builds the list in order, but `trailer` is a public field:
+        // a caller assembling a FileDiff by hand can hand over its lines in any order, and the
+        // cursor would then flush them after the wrong hunk at exit 0 — a silently corrupted
+        // diff. The check that said so was a `debug_assert!`, absent from the build a user
+        // runs. Ordering an out-of-order list is what the position tag means, and the scan that
+        // decides whether to costs one pass over a list already walked once.
+        let ordered: Vec<(usize, Vec<u8>)>;
+        let trailer: &[(usize, Vec<u8>)] = if f.trailer.windows(2).all(|w| w[0].0 <= w[1].0) {
+            &f.trailer
+        } else {
+            let mut v = f.trailer.clone();
+            // Stable, so lines tagged with the same position keep the order they arrived in.
+            v.sort_by_key(|(at, _)| *at);
+            ordered = v;
+            &ordered
+        };
         let mut ti = 0usize;
         match &f.content {
             FileContent::Binary(lines) => {
@@ -33,13 +47,13 @@ pub fn emit(patch: &Patch) -> Vec<u8> {
             FileContent::Text(hunks) => {
                 for (i, h) in hunks.iter().enumerate() {
                     emit_hunk(&mut out, h);
-                    emit_trailer_upto(&mut out, f, i + 1, &mut ti);
+                    emit_trailer_upto(&mut out, trailer, i + 1, &mut ti);
                 }
             }
         }
         // Lines tagged with a position past the emitted hunks (a file that lost hunks to a
         // selection, or a binary file) still belong to this file: flush what is left.
-        for (_, l) in &f.trailer[ti..] {
+        for (_, l) in &trailer[ti..] {
             out.extend_from_slice(l);
             out.push(b'\n');
         }
@@ -79,11 +93,11 @@ fn emitted_size_hint(patch: &Patch) -> usize {
     n
 }
 
-/// Emit the trailing lines of `f` recorded no later than its `at`-th hunk, advancing `ti` past
-/// them. The entries are ordered by that position, so each is visited once across the whole
-/// file rather than once per hunk.
-fn emit_trailer_upto(out: &mut Vec<u8>, f: &FileDiff, at: usize, ti: &mut usize) {
-    while let Some((pos, l)) = f.trailer.get(*ti) {
+/// Emit the trailing lines recorded no later than the `at`-th hunk of their file, advancing
+/// `ti` past them. `trailer` is ordered by that position, so each entry is visited once across
+/// the whole file rather than once per hunk.
+fn emit_trailer_upto(out: &mut Vec<u8>, trailer: &[(usize, Vec<u8>)], at: usize, ti: &mut usize) {
+    while let Some((pos, l)) = trailer.get(*ti) {
         if *pos > at {
             break;
         }
@@ -147,6 +161,28 @@ mod tests {
     fn roundtrip(src: &str) {
         let p = parse(src.as_bytes()).unwrap();
         assert_eq!(emit(&p), src.as_bytes(), "round-trip mismatch");
+    }
+
+    /// [`FileDiff::trailer`] is a public field, so a caller building an entry by hand can hand
+    /// over its lines in any order. The order was held by a `debug_assert!` alone, which the
+    /// release build — the build anybody actually runs — compiles away: a line then came out
+    /// after the wrong hunk at exit 0, which is a silently corrupted diff rather than a refusal.
+    #[test]
+    fn a_trailer_out_of_order_still_puts_each_line_after_its_own_hunk() {
+        let src =
+            "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+A\nafter one\n@@ -5 +5 @@\n-b\n+B\nafter two\n";
+        let mut p = parse(src.as_bytes()).unwrap();
+        assert_eq!(
+            p.files[0]
+                .trailer
+                .iter()
+                .map(|(at, _)| *at)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "the fixture carries one trailing line after each hunk"
+        );
+        p.files[0].trailer.reverse();
+        assert_eq!(emit(&p), src.as_bytes());
     }
 
     #[test]

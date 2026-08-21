@@ -248,6 +248,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Cargo.lock`, which is the shape a hand-packed archive takes when the file was left over from
   an earlier dependency set.
 
+- Trailing lines are placed by their tag even when they arrive out of order. `FileDiff::trailer`
+  pairs each line with the number of hunks before it, and emitting walks the list once, which
+  needs it ordered; the order was held by a `debug_assert!` alone. In the release build — the
+  one anybody runs — an out-of-order entry came out after the wrong hunk at exit 0, a silently
+  corrupted diff rather than a refusal. Nothing in the crate builds the list that way, but the
+  field is public. `emit` now orders what it is given, stably, and only when the one linear scan
+  that decides says it has to.
+
 ### Changed
 
 - A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being
