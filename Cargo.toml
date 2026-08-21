@@ -1,6 +1,6 @@
 [package]
 name = "hunkpick"
-version = "0.8.1"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Vitaly Ostanin <vitaly.ostanin@gmail.com>"]
