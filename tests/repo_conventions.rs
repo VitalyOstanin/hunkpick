@@ -81,3 +81,47 @@ fn line_length_stays_within_the_editorconfig_limit() {
         offenders.join("\n")
     );
 }
+
+/// `tests/edge_corpus.rs` introduces each of its tests with a banner naming it. The banners were
+/// numbered once, and the numbers stopped matching the tests the first time one was added without
+/// one — after which "test 14" pointed at the fifteenth test, and the last cycle managed to add
+/// both an unnumbered test and a new number in the same range. Names cannot drift that way, and
+/// this keeps the set of banners equal to the set of tests, which a comment could not.
+#[test]
+fn every_edge_corpus_test_is_introduced_by_a_banner_naming_it() {
+    let path = repo().join("tests").join("edge_corpus.rs");
+    let text = std::fs::read_to_string(&path).expect("the file is part of the published crate");
+    let lines: Vec<&str> = text.lines().collect();
+
+    let mut banners = Vec::new();
+    let mut tests = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        // A banner is a comment line between two rules of dashes.
+        let between_rules = i > 0
+            && lines[i - 1].starts_with("// ---")
+            && lines.get(i + 1).is_some_and(|l| l.starts_with("// ---"));
+        if between_rules {
+            if let Some(name) = line.strip_prefix("// ") {
+                banners.push(name.trim().to_string());
+            }
+        }
+        // No let-chain here: this crate builds on 1.85, where that syntax does not exist yet.
+        let after_test_attribute = lines[..i]
+            .iter()
+            .rev()
+            .take(3)
+            .any(|l| l.trim() == "#[test]");
+        if after_test_attribute {
+            if let Some(name) = line.strip_prefix("fn ") {
+                tests.push(name.split('(').next().unwrap_or_default().to_string());
+            }
+        }
+    }
+
+    banners.sort();
+    tests.sort();
+    assert_eq!(
+        banners, tests,
+        "every test needs a banner naming it, and every banner a test of that name"
+    );
+}

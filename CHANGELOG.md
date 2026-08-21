@@ -212,6 +212,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `x86_64-unknown-linux-gnu`, and a fallback that changes the bytes fuzzes something other than
   what the CLI passes in.
 
+- The banners in `tests/edge_corpus.rs` name the test they introduce instead of numbering it. The
+  numbering broke the first time a test was added without one: from that point "test 14" stood
+  above the fifteenth test, and the last cycle added both an unnumbered test and a new number in
+  the same range, so two banners claimed the same position. The numbers are gone, and a test
+  compares the set of banners with the set of `#[test]` functions, which a comment asking for the
+  convention could not.
+
 ### Changed
 
 - A UTF-16 stream with no byte-order mark is now named as an encoding problem instead of being

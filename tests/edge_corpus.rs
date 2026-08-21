@@ -6,8 +6,12 @@ use assert_cmd::Command;
 use common::git_output;
 use predicates::prelude::*;
 
+// Each test below is introduced by a banner naming it. The banners used to be numbered, and the
+// numbers stopped matching the tests as soon as one was added without one — a reference by number
+// then pointed at the wrong test, which is worse than no number at all. The name is the address.
+
 // ---------------------------------------------------------------------------
-// 1. rename_is_preserved
+// rename_is_preserved
 // ---------------------------------------------------------------------------
 
 /// A renamed file with a content change: rename headers should be present in
@@ -64,7 +68,7 @@ fn rename_is_preserved() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. mode_change_passthrough
+// mode_change_passthrough
 // ---------------------------------------------------------------------------
 
 /// A file whose mode changes (non-executable → executable) and whose content
@@ -110,7 +114,7 @@ fn mode_change_passthrough() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. new_file
+// new_file
 // ---------------------------------------------------------------------------
 
 /// A brand-new staged file: hunkpick must exit 0 and the output must contain
@@ -155,7 +159,7 @@ fn new_file() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. deleted_file
+// deleted_file
 // ---------------------------------------------------------------------------
 
 /// Deleting a committed file: hunkpick must exit 0 and preserve the
@@ -197,7 +201,7 @@ fn deleted_file() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. binary_file
+// binary_file
 // ---------------------------------------------------------------------------
 
 /// A binary file diff: `list --json` must mark it `binary: true` with zero sub-hunks.
@@ -241,7 +245,7 @@ fn binary_file() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. crlf_preserved
+// crlf_preserved
 // ---------------------------------------------------------------------------
 
 /// An inline fixture with CRLF line endings: select must round-trip the \r bytes.
@@ -281,7 +285,7 @@ fn crlf_preserved() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. plain_non_git_diff
+// plain_non_git_diff
 // ---------------------------------------------------------------------------
 
 /// A plain (non-git) unified diff without `diff --git` preamble:
@@ -308,7 +312,7 @@ fn plain_non_git_diff() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. deleted_file_is_listed_under_its_old_name
+// deleted_file_is_listed_under_its_old_name
 // ---------------------------------------------------------------------------
 
 /// A deletion has `+++ /dev/null`. The listing must name the file by its old path:
@@ -341,7 +345,7 @@ fn deleted_file_is_listed_under_its_old_name() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. format_patch_signature_survives
+// format_patch_signature_survives
 // ---------------------------------------------------------------------------
 
 /// `git format-patch` ends its output with "-- " and the git version, after the last hunk.
@@ -370,7 +374,7 @@ fn format_patch_signature_survives() {
 }
 
 // ---------------------------------------------------------------------------
-// 10. binary_file_is_addressable_in_a_multi_file_diff
+// binary_file_is_addressable_in_a_multi_file_diff
 // ---------------------------------------------------------------------------
 
 /// A binary file's entry has no `---`/`+++`, so its name comes from the `diff --git` line.
@@ -412,7 +416,7 @@ fn binary_file_is_addressable_in_a_multi_file_diff() {
 }
 
 // ---------------------------------------------------------------------------
-// 11. quoted_non_ascii_path_is_addressable
+// quoted_non_ascii_path_is_addressable
 // ---------------------------------------------------------------------------
 
 /// With git's default `core.quotePath` a non-ASCII name is written quoted and C-escaped.
@@ -455,7 +459,7 @@ fn quoted_non_ascii_path_is_addressable() {
 }
 
 // ---------------------------------------------------------------------------
-// 12. rename_only_entry_is_selectable_with_star
+// rename_only_entry_is_selectable_with_star
 // ---------------------------------------------------------------------------
 
 /// A pure rename (or a mode change) is a diff entry with no hunks. `*` must take such an
@@ -479,7 +483,7 @@ rename to new
 }
 
 // ---------------------------------------------------------------------------
-// 13. path_with_invalid_utf8_is_addressable
+// path_with_invalid_utf8_is_addressable
 // ---------------------------------------------------------------------------
 
 /// A file name that is not valid UTF-8 (legal on Unix) must still be addressable: the diff
@@ -531,7 +535,7 @@ fn path_with_invalid_utf8_is_addressable() {
 }
 
 // ---------------------------------------------------------------------------
-// Full binary patch
+// full_binary_patch_comes_out_byte_for_byte
 // ---------------------------------------------------------------------------
 
 /// `git diff --binary` writes the payload itself — `literal <n>`, base85 lines, blank
@@ -578,7 +582,7 @@ fn full_binary_patch_comes_out_byte_for_byte() {
 }
 
 // ---------------------------------------------------------------------------
-// Partial @L on a deleted file
+// a_partial_line_set_on_a_deleted_file_is_a_usage_error
 // ---------------------------------------------------------------------------
 
 /// An entry that declares the file removed (`deleted file mode`, `+++ /dev/null`) has no room
@@ -613,7 +617,7 @@ fn a_partial_line_set_on_a_deleted_file_is_a_usage_error() {
 }
 
 // ---------------------------------------------------------------------------
-// Combined (merge) diff
+// a_combined_diff_is_rejected_as_a_usage_error
 // ---------------------------------------------------------------------------
 
 /// A combined diff — what `git show` writes for a merge commit — has one marker column per
@@ -644,6 +648,10 @@ fn a_combined_diff_is_rejected_as_a_usage_error() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// a_combined_diff_without_file_markers_is_still_named_as_combined
+// ---------------------------------------------------------------------------
+
 /// `git diff --cc` writes no `---`/`+++` pair for a file resolved identically in both parents,
 /// so such a combined diff carries none of the marker lines the non-diff guard looks for. It
 /// must still be named for what it is: "no diff markers found" sends the caller looking for a
@@ -668,7 +676,7 @@ fn a_combined_diff_without_file_markers_is_still_named_as_combined() {
 }
 
 // ---------------------------------------------------------------------------
-// 14. split_addresses_a_path_with_invalid_utf8
+// split_addresses_a_path_with_invalid_utf8
 // ---------------------------------------------------------------------------
 
 /// `split` addresses a hunk the same way `select` addresses a sub-hunk, so it has to accept the
