@@ -25,6 +25,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `FileDiff::tail` and `FileDiff::ends_on_a_trailer_line` say which trailer lines follow an
+  entry's last hunk, and what having one means for the line the entry ends on. `split` and
+  `select` each spelled that rule out for themselves, and the two spellings were free to drift.
+- `parser::reads_as_a_diff_line` answers whether a line is one a diff writes: a marker line
+  carrying what its marker promises — for `@@`, a hunk header that parses — or an extended
+  header (`index`, `similarity index`, `rename from`, the mode lines) carrying what stands after
+  it. A rename and a mode-only change carry no `---`, `+++` or `@@`, so past the `diff --git`
+  line those headers are all such an entry has. The four a path follows (`rename from`,
+  `rename to`, `copy from`, `copy to`) are read on their own head, because a path may be in any
+  script; what follows the others is an object name, a mode or a percentage, written in ASCII
+  wherever the patch was, so a bare `index ` says as little as a bare `--- `. A caller weighing a
+  line out of a stream with no byte-order mark asks about the diff format, and the answer lives
+  next to the code that reads that format rather than as a length beside the check.
+- `parser::markers` reports every marker a diff line may open with, ordinary and combined.
+  `#[doc(hidden)]`, like `cli` and `gitenv`: the binary is a separate crate, and its tests of
+  the UTF-16 check weigh a corpus against each marker the parser knows, which they otherwise
+  write out a second time.
+- `parser::headers_ascii_follows` reports the extended headers whose line is ASCII past them,
+  the ones weighed the way a marker is. `#[doc(hidden)]`, for the reason `parser::markers` is:
+  the binary's test that two bare headers say nothing named three of the seven, and was free to
+  keep naming three as the list grew.
+- `parser::headers_a_path_follows` reports the four extended headers read on their own head.
+  `#[doc(hidden)]` for the same reason: the binary's test of what the count of two costs weighs
+  those four, and named them a second time to do it.
+- `parser::the_header_a_path_follows_in` reports which of the four headers a path follows opens
+  a line, the longest of them where one opens another. `#[doc(hidden)]` for the reason
+  `parser::markers` is: the binary's UTF-16 check weighs such a header against the line it read
+  it out of, and a lookup written out there would be free to take the first that opens the line —
+  whose length then decides how much of the line counts as said past it.
+- `parser::carries_something_past` answers whether a line says anything past a prefix beyond
+  whitespace — the one reading the parser gives both lists a line is weighed against.
+  `#[doc(hidden)]` for the reason `parser::markers` is: the binary's UTF-16 check weighs a header
+  a path follows against the line it read that header out of, and writing "something past it" out
+  there would be a second reading of the same tail.
+
+### Changed
+
+- `SplitError::OutOfBounds` names what it addressed with the new `split::Addressed` enum instead
+  of a `&'static str` holding `"file"` or `"hunk"`. A library caller can now match on the two
+  exhaustively; the message is unchanged.
+- `gitenv::insulated_git` builds the insulated `git` invocation that both test layers were each
+  building for themselves; it also pins the message locale, which neither copy did.
+- `model::TrailerLine` names the position-and-line pair `FileDiff::trailer` holds, which three
+  signatures spelled out. The field's type is unchanged.
+- `gitenv::MESSAGE_LOCALE_VARS` pairs each variable with the new `gitenv::LocaleAction` saying
+  what happens to it, instead of naming the one dropped variable a second time in a constant of
+  its own. A rename in the list and the constant left behind no longer disagree in silence.
+
+### Fixed
+
+- Binary data holding a NUL-padded diff marker was answered with an `iconv -f UTF-16LE` for a
+  stream that is not UTF-16. Three code units spelling `@@ `, or four spelling `--- `, are a
+  diff marker, and every rule tried against them read a single line: a minimum length, then the
+  length of the marker that matched, then what the marker promises — under which `@@ -1` was
+  refused as no hunk header while `--- x` was accepted as a path, though both are the same
+  accident of the bytes a PNG holds. What a stream is asked for now is a second line: two lines
+  of the opening window have to read as lines a diff writes. A patch has them — an entry carries
+  a header and a hunk, a rename carries the lines naming both paths — and binary data does not.
+  Nothing is asked about the stream around those lines, so the header order of a mail, a patch
+  opening with a blank line and a path in another script stay free; each of them was once a
+  reason to answer a UTF-16 patch as binary input.
+- Binary data holding a NUL-padded `rename from ` twice was answered with an `iconv` all the
+  same. The four headers a path follows are read on their own head, because the path may be in
+  any script and the parser is handed the line already read up to the first unit that is not
+  ASCII — which leaves a bare `rename from ` and a real `rename from файл.md` the same twelve
+  bytes. The check now weighs those four against the line it read them out of, where the path is
+  still there: the header counts where something stands past it, whatever script that something
+  is written in. The patch the reading was written for keeps both its lines, and a window that
+  holds nothing but the header twice keeps neither.
+- A `git format-patch` mail written in UTF-16 without a byte-order mark was rejected as binary
+  input. The encoding was looked for in the opening 128 characters, which a mail spends on its
+  headers, so the diff marker the check waits for arrived too late. The window is now wide
+  enough for those headers, and text that is not ASCII no longer ends the reading before the
+  marker: a commit subject or message in another script is read past, and a path in another
+  script leaves the marker before it standing. Such a mail — and a rename, a mode change or a
+  binary file whose only marker line carries that path — is answered with the encoding to
+  convert from. Nothing about the stream around the marker line is asked for any more, so the
+  order git wrote the mail headers in and a patch that opens with a blank line no longer decide
+  the answer either.
+- `select` appended a newline to a diff that ends in an entry with no hunks — a pure rename or a
+  mode change — and arrived without its final newline. Such an entry is written from its headers
+  alone and is always emitted whole, but it was judged by its picks, of which it has none, so the
+  result was taken to end somewhere other than where the input ended.
+- `split` dropped the trailing-newline flag of a diff that ends in a `git format-patch`
+  signature. The signature is emitted after the last hunk, so the output still ended on the line
+  the input ended on, but the cut was judged by the last line of the last hunk alone: `hunkpick
+  split 1 --at 3` on such a diff appended a newline the input never had. `select` has taken the
+  trailer into account since it learnt the rule; `split` now does the same.
+- A panic in one of the threads reading the child's output was reported as a panic in the thread
+  feeding its input: `FeedError::WriterPanicked` covered all three threads, and the message a
+  caller saw named the feeding side whichever thread had actually died. Reading now has its own
+  variant, `FeedError::ReaderPanicked`, and `GitCheckError::ReaderPanicked` behind it; both still
+  exit 70 as an internal error.
+
 ## [0.9.0] - 2026-08-21
 
 ### Fixed
