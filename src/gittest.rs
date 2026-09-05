@@ -2,21 +2,12 @@
 //!
 //! Several modules check their output by feeding it to `git apply --check` against a seeded
 //! working tree. Keeping the repository setup here means the tests state what they assert, not
-//! how a temporary repository is built, and the isolation from the developer's own git
-//! configuration is applied in one place.
+//! how a temporary repository is built. The isolation from the developer's own git
+//! configuration is not applied here: it arrives ready-made with the command, from
+//! [`crate::gitenv::insulated_git`], so the tool and both test crates get the same one.
 
+use crate::gitenv::insulated_git as git;
 use std::path::Path;
-use std::process::Command;
-
-/// A `git` invocation in `dir`, insulated from the ambient git configuration: neither the
-/// developer's settings nor the variables that point git at another repository reach it.
-fn git(dir: &Path) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.current_dir(dir);
-    crate::gitenv::insulate_config(&mut cmd, dir);
-    crate::gitenv::insulate_repo_location(&mut cmd);
-    cmd
-}
 
 /// A fresh git repository whose working tree holds a single file `f` with `content`.
 pub(crate) fn repo_with_file(content: &str) -> tempfile::TempDir {

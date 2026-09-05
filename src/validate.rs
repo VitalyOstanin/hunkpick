@@ -262,6 +262,8 @@ pub enum GitCheckError {
     Io(std::io::Error),
     /// The thread writing the diff to git's stdin panicked.
     WriterPanicked,
+    /// A thread reading git's output panicked.
+    ReaderPanicked,
     /// git ran and refused the diff. Carries its stderr.
     Rejected(String),
     /// git ran but never reached a verdict: a fatal error of its own (a broken repository, an
@@ -283,6 +285,9 @@ impl fmt::Display for GitCheckError {
             }
             GitCheckError::Io(e) => write!(f, "git check failed: {e}"),
             GitCheckError::WriterPanicked => write!(f, "the thread feeding git panicked"),
+            GitCheckError::ReaderPanicked => {
+                write!(f, "a thread reading git's output panicked")
+            }
             GitCheckError::Rejected(stderr) => {
                 write!(f, "git apply --check rejected the result diff: {stderr}")
             }
@@ -319,7 +324,9 @@ impl std::error::Error for GitCheckError {
         match self {
             GitCheckError::Spawn { source, .. } => Some(source),
             GitCheckError::Io(e) => Some(e),
-            GitCheckError::WriterPanicked | GitCheckError::Rejected(_) => None,
+            GitCheckError::WriterPanicked
+            | GitCheckError::ReaderPanicked
+            | GitCheckError::Rejected(_) => None,
             // git's own words are in the message; there is no error value behind them.
             GitCheckError::Failed { .. } => None,
         }
@@ -351,6 +358,7 @@ pub fn validate_with_git(diff_bytes: &[u8], dir: &Path) -> Result<(), GitCheckEr
             GitCheckError::Io(e)
         }
         crate::gitenv::FeedError::WriterPanicked => GitCheckError::WriterPanicked,
+        crate::gitenv::FeedError::ReaderPanicked => GitCheckError::ReaderPanicked,
     })?;
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     match output.status.code() {

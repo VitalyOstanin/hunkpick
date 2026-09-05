@@ -1,8 +1,10 @@
-//! The environment variables that decide which repository a `git` invocation acts on.
+//! What a `git` child is insulated from and how one is fed: the variables that decide which
+//! repository it acts on, the locale its messages come back in, the assembled command that
+//! drops both, and the plumbing that feeds it a diff.
 //!
 //! Every place that runs `git` — the result-diff check in [`crate::validate`], the unit-test
-//! helpers, the integration tests — has to drop the same set, and a list copied per call site
-//! drifts: three copies of it had already grown three different memberships. One list, one
+//! helpers, the integration tests — has to drop the same variables, and a list copied per call
+//! site drifts: three copies of it had already grown three different memberships. One list, one
 //! meaning.
 
 use std::io::{Read, Write};
@@ -36,19 +38,41 @@ pub fn insulate_repo_location(cmd: &mut Command) {
 /// that with `String::from_utf8_lossy` and puts it in front of the user next to its own
 /// ASCII-English text, so an inherited locale would show up there as another language, or as
 /// U+FFFD where the bytes are not UTF-8.
-pub const MESSAGE_LOCALE_VARS: [&str; 4] = ["LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"];
+/// Each is paired with what [`pin_message_locale`] does to it. The pairing is the declaration:
+/// naming the one dropped variable a second time, in a constant of its own, let a rename in the
+/// list and the constant left behind disagree without anything reporting it — the variable then
+/// quietly got the other treatment.
+pub const MESSAGE_LOCALE_VARS: [(&str, LocaleAction); 4] = [
+    ("LC_ALL", LocaleAction::Pin),
+    ("LC_MESSAGES", LocaleAction::Pin),
+    ("LANG", LocaleAction::Pin),
+    // Dropped rather than set: gettext reads it as a list of languages to try and ignores it
+    // only while the locale is `C`, which leaves nothing to gain by keeping it.
+    ("LANGUAGE", LocaleAction::Drop),
+];
+
+/// What [`pin_message_locale`] does with one of [`MESSAGE_LOCALE_VARS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocaleAction {
+    /// Set to [`C_LOCALE`].
+    Pin,
+    /// Removed from the environment.
+    Drop,
+}
+
 /// The locale asked of a `git` child: the C locale, whose messages are English and ASCII.
 pub const C_LOCALE: &str = "C";
 
 /// Pin the message locale of `cmd` to [`C_LOCALE`], so what git says about a rejected diff is
-/// English ASCII whatever the surrounding locale is. `LANGUAGE` is dropped rather than set:
-/// gettext reads it as a list of languages to try and ignores it only while the locale is `C`,
-/// which leaves nothing to gain by keeping it.
+/// English ASCII whatever the surrounding locale is. What happens to each variable is declared
+/// with the variable itself, in [`MESSAGE_LOCALE_VARS`].
 pub fn pin_message_locale(cmd: &mut Command) {
-    cmd.env("LC_ALL", C_LOCALE);
-    cmd.env("LC_MESSAGES", C_LOCALE);
-    cmd.env("LANG", C_LOCALE);
-    cmd.env_remove("LANGUAGE");
+    for (var, action) in MESSAGE_LOCALE_VARS {
+        match action {
+            LocaleAction::Pin => cmd.env(var, C_LOCALE),
+            LocaleAction::Drop => cmd.env_remove(var),
+        };
+    }
 }
 
 /// The file name given to git as its global configuration when a caller wants none.
@@ -68,6 +92,22 @@ pub fn insulate_config(cmd: &mut Command, scratch_dir: &Path) {
     cmd.env("GIT_CONFIG_SYSTEM", scratch_dir.join(ABSENT_SYSTEM_CONFIG));
 }
 
+/// A `git` invocation in `dir`, insulated from everything about the surrounding process that
+/// could change what git does or how it says it: the ambient configuration, the variables that
+/// point git at another repository, and the message locale.
+///
+/// Built here rather than at each call site for the reason stated at the top of this module: a
+/// copy per caller drifts. The tests of the crate and of its integration suite both build this
+/// command, and neither of them pinned the locale while the tool itself did.
+pub fn insulated_git(dir: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(dir);
+    insulate_config(&mut cmd, dir);
+    insulate_repo_location(&mut cmd);
+    pin_message_locale(&mut cmd);
+    cmd
+}
+
 /// Why feeding a child process its input did not produce an [`Output`].
 ///
 /// The distinction that matters to a caller is between "the child answered" and "we never got an
@@ -80,6 +120,8 @@ pub enum FeedError {
     Write(std::io::Error),
     /// The thread writing the input panicked.
     WriterPanicked,
+    /// A thread reading the child's output panicked.
+    ReaderPanicked,
     /// Reading the child's output, or waiting for it, failed.
     Wait(std::io::Error),
 }
@@ -90,6 +132,7 @@ impl std::fmt::Display for FeedError {
             FeedError::Spawn(e) => write!(f, "could not start the process: {e}"),
             FeedError::Write(e) => write!(f, "could not write the input: {e}"),
             FeedError::WriterPanicked => write!(f, "the thread feeding the input panicked"),
+            FeedError::ReaderPanicked => write!(f, "a thread reading the output panicked"),
             FeedError::Wait(e) => write!(f, "could not collect the output: {e}"),
         }
     }
@@ -99,7 +142,7 @@ impl std::error::Error for FeedError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             FeedError::Spawn(e) | FeedError::Write(e) | FeedError::Wait(e) => Some(e),
-            FeedError::WriterPanicked => None,
+            FeedError::WriterPanicked | FeedError::ReaderPanicked => None,
         }
     }
 }
@@ -128,14 +171,48 @@ pub fn feed_and_wait(cmd: &mut Command, bytes: &[u8]) -> Result<Output, FeedErro
     let mut child_stdout = child.stdout.take().expect("stdout was configured as piped");
     let mut child_stderr = child.stderr.take().expect("stderr was configured as piped");
 
-    let (written, stdout, stderr, status) = std::thread::scope(|scope| {
+    let outcome = std::thread::scope(|scope| {
         let writer = scope.spawn(move || stdin.write_all(bytes));
         let out = scope.spawn(move || read_to_end(&mut child_stdout));
         let err = scope.spawn(move || read_to_end(&mut child_stderr));
         let status = wait_or_kill(&mut child);
-        (writer.join(), out.join(), err.join(), status)
+        FeedOutcome {
+            written: writer.join(),
+            stdout: out.join(),
+            stderr: err.join(),
+            status,
+        }
     });
 
+    assemble(outcome)
+}
+
+/// What the four outcomes of the scope in [`feed_and_wait`] came back with: the three threads
+/// it starts and the wait this one does.
+///
+/// Carried in named fields rather than passed as four arguments: the two reader results have
+/// the same type, so handing them over the wrong way round compiles and silently exchanges the
+/// child's streams in the answer.
+struct FeedOutcome {
+    /// What became of writing the input.
+    written: std::thread::Result<std::io::Result<()>>,
+    /// What the child wrote on stdout.
+    stdout: std::thread::Result<std::io::Result<Vec<u8>>>,
+    /// What the child wrote on stderr.
+    stderr: std::thread::Result<std::io::Result<Vec<u8>>>,
+    /// How the child ended.
+    status: std::io::Result<std::process::ExitStatus>,
+}
+
+/// Turn the four outcomes of the scope in [`feed_and_wait`] into one result. Separate from the
+/// scope so that the panic branches can be exercised without arranging a thread to panic.
+fn assemble(outcome: FeedOutcome) -> Result<Output, FeedError> {
+    let FeedOutcome {
+        written,
+        stdout,
+        stderr,
+        status,
+    } = outcome;
     match written {
         // A closed pipe means the child stopped reading — it reached its answer early. Its exit
         // status and output carry the diagnosis, so this is not the error to report.
@@ -145,8 +222,8 @@ pub fn feed_and_wait(cmd: &mut Command, bytes: &[u8]) -> Result<Output, FeedErro
         Err(_) => return Err(FeedError::WriterPanicked),
         _ => {}
     }
-    let stdout = stdout.map_err(|_| FeedError::WriterPanicked)?;
-    let stderr = stderr.map_err(|_| FeedError::WriterPanicked)?;
+    let stdout = stdout.map_err(|_| FeedError::ReaderPanicked)?;
+    let stderr = stderr.map_err(|_| FeedError::ReaderPanicked)?;
     Ok(Output {
         status: status.map_err(FeedError::Wait)?,
         stdout: stdout.map_err(FeedError::Wait)?,
@@ -196,6 +273,49 @@ mod tests {
                 "{var} must point inside the scratch directory"
             );
         }
+    }
+
+    /// A panic on the reading side must not be reported as a panic on the writing side. The two
+    /// threads fail for different reasons, and the message is all a caller ever sees: the exit
+    /// code is the same 70 either way.
+    #[test]
+    fn a_panicking_reader_is_not_reported_as_a_failed_feed() {
+        let panicked: std::thread::Result<std::io::Result<Vec<u8>>> =
+            Err(Box::new("the reading thread panicked"));
+        let err = assemble(FeedOutcome {
+            written: Ok(Ok(())),
+            stdout: panicked,
+            stderr: Ok(Ok(Vec::new())),
+            status: Err(std::io::Error::other("the status is never reached")),
+        })
+        .expect_err("a panicking reader is an error");
+        assert!(
+            err.to_string().contains("reading"),
+            "the message must name the reading side: {err}"
+        );
+    }
+
+    /// Each of the child's streams comes back in the field named for it. The two carry the same
+    /// type from the reading threads all the way to [`Output`], so an exchange of them is a
+    /// change of what the caller reads that no compiler reports; the field names are what rules
+    /// it out, and this states the mapping they stand for.
+    #[test]
+    fn each_stream_of_the_child_lands_in_its_own_field() {
+        // A real `ExitStatus`, which has no portable constructor; its value is beside the point
+        // here, and the child's own output would otherwise land in the test run's.
+        let status = Command::new("git")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .status();
+        let out = assemble(FeedOutcome {
+            written: Ok(Ok(())),
+            stdout: Ok(Ok(b"out".to_vec())),
+            stderr: Ok(Ok(b"err".to_vec())),
+            status,
+        })
+        .expect("nothing failed");
+        assert_eq!(out.stdout, b"out", "stdout must carry what stdout said");
+        assert_eq!(out.stderr, b"err", "stderr must carry what stderr said");
     }
 
     /// Input and output both larger than a pipe buffer come back whole. The child is fed from
@@ -249,13 +369,17 @@ mod tests {
                 "{var} must be dropped"
             );
         }
-        for var in MESSAGE_LOCALE_VARS {
+        for (var, action) in MESSAGE_LOCALE_VARS {
             let entry = envs.iter().find(|(k, _)| *k == var);
             let (_, value) = entry.unwrap_or_else(|| panic!("{var} must be set or dropped"));
-            assert!(
-                *value == Some(C_LOCALE.as_ref()) || (var == "LANGUAGE" && value.is_none()),
-                "{var} must be pinned to the C locale"
-            );
+            match action {
+                LocaleAction::Pin => assert_eq!(
+                    *value,
+                    Some(C_LOCALE.as_ref()),
+                    "{var} must be pinned to the C locale"
+                ),
+                LocaleAction::Drop => assert!(value.is_none(), "{var} must be dropped"),
+            }
         }
     }
 }

@@ -332,7 +332,6 @@ fn usage<E: std::fmt::Display>(e: E) -> AppError {
     AppError::Usage(format!("{e}"))
 }
 
-/// Verify the result diff (internal check by default, optional git check) then emit it.
 /// The working tree `git apply --check` is to run in: the value of `-C DIR`, or the current
 /// directory.
 ///
@@ -357,6 +356,7 @@ fn check_dir(dir: Option<&Path>) -> Result<PathBuf, AppError> {
     }
 }
 
+/// Verify the result diff (internal check by default, optional git check) then emit it.
 fn emit_verified(out: &model::Patch, verify: &VerifyOpts) -> Result<(), AppError> {
     if !verify.no_verify_result_diff_internal {
         validate::validate_internal(out)
@@ -371,7 +371,9 @@ fn emit_verified(out: &model::Patch, verify: &VerifyOpts) -> Result<(), AppError
         // broken environment.
         validate::validate_with_git(&bytes, &dir).map_err(|e| match e {
             validate::GitCheckError::Rejected(_) => AppError::Verify(e.to_string()),
-            validate::GitCheckError::WriterPanicked => AppError::Internal(e.to_string()),
+            validate::GitCheckError::WriterPanicked | validate::GitCheckError::ReaderPanicked => {
+                AppError::Internal(e.to_string())
+            }
             validate::GitCheckError::Spawn { .. }
             | validate::GitCheckError::Io(_)
             | validate::GitCheckError::Failed { .. } => AppError::Io(e.to_string()),

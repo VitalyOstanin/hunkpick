@@ -15,10 +15,10 @@ pub enum AppError {
     Verify(String),
     /// I/O error reading stdin or writing stdout.
     Io(String),
-    /// Unexpected internal error: an invariant of hunkpick's own broke. Constructed where the
-    /// thread feeding `git apply --check` panics (`GitCheckError::WriterPanicked`) — nothing
-    /// about the caller's input explains that, and it shares exit code 70 with `Verify` because
-    /// both say the fault is hunkpick's.
+    /// Unexpected internal error: an invariant of hunkpick's own broke. Constructed where a
+    /// helper thread of the `git apply --check` run panics (`GitCheckError::WriterPanicked`,
+    /// `GitCheckError::ReaderPanicked`) — nothing about the caller's input explains that, and it
+    /// shares exit code 70 with `Verify` because both say the fault is hunkpick's.
     Internal(String),
 }
 

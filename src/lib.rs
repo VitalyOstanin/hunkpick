@@ -66,12 +66,11 @@ pub mod cli;
 pub mod emit;
 /// Application errors and the process exit codes they map to.
 pub mod error;
-/// The environment variables that decide which repository a `git` child acts on, and the
-/// plumbing that feeds one a diff.
-///
 /// Not part of the library contract, and public for the same reason as [`cli`]: the test crates
 /// insulate their `git` invocations exactly the way the tool does, and they cannot see a
-/// `pub(crate)` item.
+/// `pub(crate)` item. What the module holds is said in its own header, and only there — rustdoc
+/// shows this note and that header as one page, so a summary written here as well would be the
+/// same sentence twice on it.
 #[doc(hidden)]
 pub mod gitenv;
 #[cfg(test)]
