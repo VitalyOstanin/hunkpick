@@ -26,8 +26,8 @@ pub fn emit(patch: &Patch) -> Vec<u8> {
         // diff. The check that said so was a `debug_assert!`, absent from the build a user
         // runs. Ordering an out-of-order list is what the position tag means, and the scan that
         // decides whether to costs one pass over a list already walked once.
-        let ordered: Vec<(usize, Vec<u8>)>;
-        let trailer: &[(usize, Vec<u8>)] = if f.trailer.windows(2).all(|w| w[0].0 <= w[1].0) {
+        let ordered: Vec<TrailerLine>;
+        let trailer: &[TrailerLine] = if f.trailer.windows(2).all(|w| w[0].0 <= w[1].0) {
             &f.trailer
         } else {
             let mut v = f.trailer.clone();
@@ -96,7 +96,7 @@ fn emitted_size_hint(patch: &Patch) -> usize {
 /// Emit the trailing lines recorded no later than the `at`-th hunk of their file, advancing
 /// `ti` past them. `trailer` is ordered by that position, so each entry is visited once across
 /// the whole file rather than once per hunk.
-fn emit_trailer_upto(out: &mut Vec<u8>, trailer: &[(usize, Vec<u8>)], at: usize, ti: &mut usize) {
+fn emit_trailer_upto(out: &mut Vec<u8>, trailer: &[TrailerLine], at: usize, ti: &mut usize) {
     while let Some((pos, l)) = trailer.get(*ti) {
         if *pos > at {
             break;

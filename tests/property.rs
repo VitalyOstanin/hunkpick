@@ -410,7 +410,6 @@ proptest! {
     #[test]
     fn splitting_drops_the_final_newline_only_where_the_input_ended(shape in arb_signed_shape()) {
         let mut shape = shape;
-        shape.signature = false;
         shape.no_trailing_newline = true;
         let src = render(&shape);
         prop_assume!(!src.ends_with(b"\n"));
@@ -444,6 +443,14 @@ proptest! {
                 src.ends_with(last_line),
                 "the output ends on {:?}, which is not where the input ended",
                 String::from_utf8_lossy(last_line)
+            );
+        } else {
+            // The other direction: a signature is emitted after the last hunk, so it survives
+            // any cut of the hunks above it. The output still ends where the input did, and the
+            // newline the input did not have may not appear.
+            prop_assert!(
+                !shape.signature,
+                "a cut under the signature added the newline the input lacked"
             );
         }
     }

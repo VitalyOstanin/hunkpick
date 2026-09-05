@@ -727,7 +727,7 @@ fn select_from_file(
     subs_cache: &BTreeMap<usize, Vec<Hunk>>,
 ) -> Result<(FileDiff, bool), SelectError> {
     let (content, mut ends_on_the_files_last_line) = match &src.content {
-        // A binary file has no sub-hunks; its picks vec is always empty. It is taken whole,
+        // A binary file has no sub-hunks, so its picks are always empty. It is taken whole,
         // so its last line is emitted.
         FileContent::Binary(b) => (FileContent::Binary(b.clone()), true),
         FileContent::Text(_) => {
@@ -738,28 +738,26 @@ fn select_from_file(
             let picks = picks.into_ordered();
             let subs = &subs_cache[&fi];
             // The file's last line is the last line of its last sub-hunk, and it survives
-            // only when that sub-hunk is taken whole — an `@L` cut may drop it.
-            let ends_on_the_files_last_line =
-                matches!(picks.last(), Some(Chosen::Whole(i)) if *i == subs.len());
+            // only when that sub-hunk is taken whole — an `@L` cut may drop it. An entry with no
+            // sub-hunks at all (a pure rename, a mode change) is written from its headers, which
+            // are emitted whole, so it ends on its own last line with no picks to show for it.
+            let ends_on_the_files_last_line = subs.is_empty()
+                || matches!(picks.last(), Some(Chosen::Whole(i)) if *i == subs.len());
             let hunks = materialise_picks(subs, &picks)?;
             reject_partial_selection_of_a_deleted_file(src, &hunks)?;
             (FileContent::Text(hunks), ends_on_the_files_last_line)
         }
     };
-    // Only the file's tail (lines after its last hunk, e.g. the `-- \n<version>` signature
-    // of a format-patch) carries over: it keeps its meaning whichever sub-hunks were
-    // picked. Lines recorded between hunks have no defined place once hunks are dropped
-    // or split, so they are not emitted.
-    let src_hunks = src.hunk_count();
+    // Only the file's tail carries over, and which lines that is — and what having one says
+    // about the line the file ends on — is `FileDiff::tail`'s to say; `split` reads the same
+    // rule off the same method. A tail collected here and no tail at all is what
+    // `FileDiff::ends_on_a_trailer_line` reports for this same entry, so it is read off what
+    // was just gathered rather than by walking the trailer a second time. That holds because
+    // every line `tail()` yields is kept: a filter added to this collection would leave the
+    // flag answering a narrower question than the method it stands in for, and would have to
+    // ask the method instead.
     let out_hunks = content.hunk_count();
-    let trailer: Vec<_> = src
-        .trailer
-        .iter()
-        .filter(|(at, _)| *at == src_hunks)
-        .map(|(_, l)| (out_hunks, l.clone()))
-        .collect();
-    // A tail is emitted after the hunks and always carries over, so with one present the
-    // file ends on the line it ended on before, whichever sub-hunks were picked.
+    let trailer: Vec<_> = src.tail().map(|(_, l)| (out_hunks, l.clone())).collect();
     ends_on_the_files_last_line |= !trailer.is_empty();
     let file = FileDiff {
         headers: src.headers.clone(),
@@ -1240,12 +1238,27 @@ diff --git a/f b/f
         );
     }
 
-    /// The other half of the same guarantee, and the shape a script actually produces: every
-    /// change in the file is identical, so they all share one id, and reading the ids out of
-    /// `list --json` yields that id once per sub-hunk. Recording a pick per (occurrence x match)
-    /// made the accumulator grow as the square of the number of changes — 8 000 of them cost
-    /// A repeated `*` is the same accumulator defect reached without ids: each one used to add a
-    /// pick per sub-hunk of the file. Nobody writes it by hand, but the cost belongs to the
+    /// An entry with no hunks — a pure rename, a mode change — is emitted from its headers alone,
+    /// so it always ends on the line it ended on. Judging it by its picks, of which it has none,
+    /// says the opposite and appends a newline the input never had.
+    #[test]
+    fn a_hunkless_entry_ends_on_its_own_last_line() {
+        const RENAME: &str = "\
+diff --git a/a b/b
+similarity index 100%
+rename from a
+rename to b";
+        let p = parse(RENAME.as_bytes()).unwrap();
+        assert!(p.no_trailing_newline, "the input ends mid-line");
+        let sels = parse_selectors(&["*".to_string()]).unwrap();
+        let out = select(&p, &sels).expect("'*' always resolves");
+        assert_eq!(
+            emit(&out),
+            RENAME.as_bytes(),
+            "selecting everything of a rename must reproduce the input"
+        );
+    }
+
     /// The accumulator must hold one pick per selected sub-hunk, not one per (occurrence x
     /// match). Every change here is identical, so all of them share one id, and reading the ids
     /// out of `list --json` yields that id once per sub-hunk — the shape a script produces. A

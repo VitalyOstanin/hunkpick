@@ -71,7 +71,7 @@ pub struct FileDiff {
     /// it orders a list that arrives out of order before doing so — a caller assembling a
     /// `FileDiff` by hand gets its lines placed by their tag either way, at the cost of one
     /// sort. Entries sharing a position keep the order they were given.
-    pub trailer: Vec<(usize, Vec<u8>)>,
+    pub trailer: Vec<TrailerLine>,
     /// Old-side path with the `a/` prefix stripped and git quoting decoded; `None` until a
     /// `--- ` or `diff --git` line supplies it. Raw bytes, so a non-UTF-8 name round-trips.
     pub old_path: Option<Vec<u8>>,
@@ -80,6 +80,12 @@ pub struct FileDiff {
     /// The file's body.
     pub content: FileContent,
 }
+
+/// One line that follows a hunk body, paired with the number of hunks seen before it: a blank
+/// separator, the `-- \n<version>` signature of a `format-patch` diff, or trailing junk. The
+/// position is what puts the line back where it was, and naming the pair keeps that meaning in
+/// one place — see [`FileDiff::trailer`].
+pub type TrailerLine = (usize, Vec<u8>);
 
 /// A parsed unified diff: its file entries in input order, plus whatever preceded the first
 /// one.
@@ -117,6 +123,30 @@ impl FileDiff {
     /// How many hunks the entry carries; see [`FileContent::hunk_count`].
     pub fn hunk_count(&self) -> usize {
         self.content.hunk_count()
+    }
+
+    /// The entry's tail: the [`FileDiff::trailer`] lines recorded after its last hunk, such as
+    /// the `-- \n<version>` signature of a `format-patch` diff. They keep their meaning whichever
+    /// hunks the body ends up with, so they are emitted after it whatever was cut or picked.
+    /// Lines recorded between hunks are not part of it: once hunks are dropped or split, they
+    /// have no defined place.
+    ///
+    /// One definition for one rule. [`crate::split`] asks whether a tail is there and
+    /// [`crate::select`] carries it over, and a second spelling of "after the last hunk" in
+    /// either of them is free to drift from this one. A caller that has already collected the
+    /// tail from this method reads the same answer off what it collected — that is this rule
+    /// applied once, not a second spelling of it, for as long as nothing is dropped on the way
+    /// into the collection.
+    pub fn tail(&self) -> impl Iterator<Item = &TrailerLine> {
+        let last = self.hunk_count();
+        self.trailer.iter().filter(move |(at, _)| *at >= last)
+    }
+
+    /// Whether the entry ends on a trailer line rather than on the last line of its last hunk.
+    /// A tail is emitted after the body, so with one present the entry ends where it ended
+    /// before, however its hunks were cut or picked.
+    pub fn ends_on_a_trailer_line(&self) -> bool {
+        self.tail().next().is_some()
     }
 }
 

@@ -31,8 +31,8 @@ pub enum SplitError {
     /// asked for and how many there are. Reachable only by a direct library caller, for the
     /// same reason as above.
     OutOfBounds {
-        /// What was addressed: `"file"` or `"hunk"`.
-        what: &'static str,
+        /// What was addressed.
+        what: Addressed,
         /// The 0-based index the caller asked for.
         index: usize,
         /// How many exist.
@@ -70,6 +70,26 @@ impl fmt::Display for SplitError {
 /// Lets callers treat it as a boxed [`std::error::Error`], as the Rust API guidelines ask
 /// of a public error type.
 impl std::error::Error for SplitError {}
+
+/// What an out-of-range address named. Spelled out as a type rather than as the word that ends
+/// up in the message: a caller matching on [`SplitError::OutOfBounds`] can tell the two apart
+/// without comparing strings, and a misspelling stops compiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Addressed {
+    /// A file entry of the patch.
+    File,
+    /// A hunk of one entry.
+    Hunk,
+}
+
+impl fmt::Display for Addressed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Addressed::File => write!(f, "file"),
+            Addressed::Hunk => write!(f, "hunk"),
+        }
+    }
+}
 
 /// Auto-split a hunk into minimal sub-hunks at context gaps between change runs.
 /// Returns the hunk unchanged (as a single element) if it has zero or one change run.
@@ -172,7 +192,7 @@ pub fn split_file_hunk(
     };
     if hi >= hunks.len() {
         return Err(SplitError::OutOfBounds {
-            what: "hunk",
+            what: Addressed::Hunk,
             index: hi,
             available: hunks.len(),
         });
@@ -213,7 +233,7 @@ pub fn split_patch_hunk(
 ) -> Result<usize, SplitError> {
     if fi >= patch.files.len() {
         return Err(SplitError::OutOfBounds {
-            what: "file",
+            what: Addressed::File,
             index: fi,
             available: patch.files.len(),
         });
@@ -227,7 +247,10 @@ pub fn split_patch_hunk(
     let pieces = split_file_hunk(&mut patch.files[fi], hi, new_line_cuts)?;
 
     if let Some(was) = last_line_before {
-        let still_there = last_body_line(&patch.files[fi].content) == Some(&was);
+        let f = &patch.files[fi];
+        // The entry ends on its tail when it has one, whichever way the hunks above were cut;
+        // `select` reads the same rule off the same method where it builds its result.
+        let still_there = f.ends_on_a_trailer_line() || last_body_line(&f.content) == Some(&was);
         patch.no_trailing_newline &= still_there;
     }
     Ok(pieces)
@@ -960,7 +983,7 @@ Lc$_iAxSk1
         assert_eq!(
             split_file_hunk(&mut p.files[0], 7, &[1]),
             Err(SplitError::OutOfBounds {
-                what: "hunk",
+                what: Addressed::Hunk,
                 index: 7,
                 available: 1
             })
@@ -968,7 +991,7 @@ Lc$_iAxSk1
         assert_eq!(
             split_patch_hunk(&mut p, 3, 0, &[1]),
             Err(SplitError::OutOfBounds {
-                what: "file",
+                what: Addressed::File,
                 index: 3,
                 available: 1
             })
@@ -1018,5 +1041,35 @@ diff --git a/f b/f
         let mut p = parse(BOTH_PIECES_CHANGE.as_bytes()).unwrap();
         split_patch_hunk(&mut p, 0, 0, &[3]).unwrap();
         assert!(p.no_trailing_newline, "the result still ends on ` e`");
+    }
+    /// A signature line is emitted after the last hunk, so the entry ends on it whichever way the
+    /// hunks above were cut. Dropping the flag here removes the newline from a line the input did
+    /// end with, and `git apply` reads the result as a corrupt patch.
+    #[test]
+    fn a_cut_under_a_signature_leaves_the_last_line_of_the_input_in_place() {
+        const SIGNED: &str = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,5 +1,5 @@
+ a
+-b
++B
+ c
+ d
+ e
+-- 
+2.53.0";
+        let mut p = parse(SIGNED.as_bytes()).unwrap();
+        assert!(p.no_trailing_newline, "the input ends mid-line");
+        split_patch_hunk(&mut p, 0, 0, &[3]).unwrap();
+        assert!(
+            p.no_trailing_newline,
+            "the output still ends on `2.53.0`, the line the input ended on"
+        );
+        assert!(
+            !emit(&p).ends_with(b"\n"),
+            "a newline the input did not have must not appear"
+        );
     }
 }
