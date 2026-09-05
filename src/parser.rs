@@ -197,19 +197,215 @@ fn new_file(headers: Vec<Vec<u8>>) -> FileDiff {
 /// markers found". Its `---`/`+++` pair is omitted for a file resolved the same way in both
 /// parents, so the ordinary markers do not always appear in one.
 pub fn looks_like_a_diff(input: &[u8]) -> bool {
-    const MARKERS: [&[u8]; 5] = [b"diff --git ", b"--- ", b"+++ ", b"@@ ", b"Binary files "];
     input
         .split(|&b| b == b'\n')
-        .any(|line| MARKERS.iter().any(|m| line.starts_with(m)) || is_combined_marker(line))
+        .any(|line| diff_marker(line).is_some())
 }
 
-/// Whether the line marks a combined diff: the header git writes for a merge (`diff --cc`,
-/// `diff --combined`) or its hunk header, which has one `@` per side plus one (`@@@ -1,3 -1,3
+/// The marker at the head of `line` that opens a diff, if one does — the same set
+/// [`looks_like_a_diff`] answers on, reported rather than counted.
+///
+/// Which marker it is decides how the rest of the line is read, so a caller that has to weigh a
+/// line against its marker — [`says_what_its_marker_promises`] does — starts here rather than
+/// keeping a second list beside this one.
+fn diff_marker(line: &[u8]) -> Option<&'static [u8]> {
+    longest_prefix(markers(), line)
+}
+
+/// Every marker a diff line may open with, ordinary and combined.
+///
+/// Not part of the library contract, and public for the reason the lists themselves are not:
+/// the binary is a separate crate, and a test of it that reads one marker closely and the rest
+/// loosely — every revision of the UTF-16 check so far has — would otherwise write the set out a
+/// second time and be free to fall behind this one.
+#[doc(hidden)]
+pub fn markers() -> impl Iterator<Item = &'static [u8]> {
+    ORDINARY_MARKERS
+        .iter()
+        .chain(COMBINED_MARKERS.iter())
+        .copied()
+}
+
+/// The longest of `prefixes` that opens `line`.
+///
+/// The longest match, not the first: what a prefix leaves behind is read past its length, so a
+/// prefix that opens another would otherwise let the order the two are listed in decide how much
+/// of the line counts as said beyond it. Stated over a list handed in rather than over the
+/// arrays directly — the markers are one such list and the headers ASCII follows another, and
+/// no member of either opens another today, so the rule can only be exercised against a pair
+/// where one does.
+fn longest_prefix(
+    prefixes: impl Iterator<Item = &'static [u8]>,
+    line: &[u8],
+) -> Option<&'static [u8]> {
+    prefixes
+        .filter(|p| line.starts_with(p))
+        .max_by_key(|p| p.len())
+}
+
+/// Whether `line` carries what the marker at its head promises: a `@@` line that parses as a
+/// hunk header, and for any other marker something past it that is not whitespace.
+///
+/// A marker on its own says nothing about the stream it was read out of. Binary data holding
+/// `@@ ` or `diff --git ` NUL-padded carries one, and so does a line that is the marker and the
+/// line ending a patch written under Windows leaves behind. A caller weighing such a line — the
+/// CLI does, judging whether what it read out of a stream with no byte-order mark is evidence of
+/// UTF-16 — asks about the diff format, so the answer is written next to the code that reads it
+/// rather than as a length or a threshold at the call site.
+fn says_what_its_marker_promises(line: &[u8]) -> bool {
+    let Some(marker) = diff_marker(line) else {
+        return false;
+    };
+    // A hunk header is the one marker line whose shape the parser already states in full, and
+    // the shape is what tells `@@ -1` inside binary data from a header a diff carries.
+    if marker == HUNK_HEADER_MARKER {
+        return parse_hunk_header(line).is_ok();
+    }
+    carries_something_past(line, marker)
+}
+
+/// Whether `line` says anything past `prefix` beyond whitespace.
+///
+/// The one reading given to both lists a line is weighed against — the markers and the headers
+/// ASCII follows — rather than the same three lines written beside each: the rule would
+/// otherwise be free to change for a marker and stay as it was for a header, and
+/// [`reads_as_a_diff_line`] would answer the same tail two ways.
+///
+/// Whitespace as the language already spells it, rather than a set written out here beside a
+/// sentence naming its members: the two would be free to disagree. A line ending counts as
+/// whitespace wherever the caller read the line from — one that splits on `\n` never sees it,
+/// one that hands the line over whole does, and the answer is the same either way.
+///
+/// `prefix` is expected to open `line`: the tail is what stands past it, which is a reading only
+/// there. Asked where it does not, the answer is that nothing stands past it — the helper is
+/// asked by a caller holding a line of its own and a prefix chosen by a separate reading, and an
+/// answer is of more use there than a stop. The head of the line is read rather than the length
+/// of the prefix measured off it: a prefix longer than the line would otherwise be the only one
+/// refused, and a shorter one that opens nothing would hand back a tail cut at a place no
+/// reading pointed at.
+///
+/// Not part of the library contract, and public for the reason [`markers`] is: the binary is a
+/// separate crate, and its UTF-16 check weighs a header a path follows against the line it read
+/// the header out of. Written out there, "something past it" would be a second reading of the
+/// same tail, free to keep whitespace where this one stopped counting it.
+#[doc(hidden)]
+pub fn carries_something_past(line: &[u8], prefix: &[u8]) -> bool {
+    line.strip_prefix(prefix)
+        .is_some_and(|tail| tail.iter().any(|b| !b.is_ascii_whitespace()))
+}
+
+/// The lines a diff writes about a file besides the markers that open an entry or a hunk, and
+/// that a path follows. A rename and a copy carry no `---`, `+++` or `@@`, so past the
+/// `diff --git` line these are all such an entry has; unlike a marker they promise nothing
+/// after themselves, because what follows is a path, which may be in any script and is not
+/// there to be read.
+const HEADERS_A_PATH_FOLLOWS: [&[u8]; 4] =
+    [b"rename from ", b"rename to ", b"copy from ", b"copy to "];
+
+/// The other lines a diff writes about a file: an object name, a mode, a percentage. What
+/// follows each is ASCII wherever the patch was written, so they are weighed the way a marker is
+/// rather than taken on their own head — a bare `index ` says as little about the stream it was
+/// read out of as a bare `--- ` does.
+const HEADERS_ASCII_FOLLOWS: [&[u8]; 7] = [
+    b"index ",
+    b"similarity index ",
+    b"dissimilarity index ",
+    b"new file mode ",
+    b"deleted file mode ",
+    b"old mode ",
+    b"new mode ",
+];
+
+/// Whether `line` reads as a line a diff writes: a marker line carrying what its marker
+/// promises, an extended header carrying what stands after it, or one of the four headers a
+/// path follows, which is read on its own head because the path may be in any script.
+///
+/// One such line is not evidence that the stream around it is a diff — a NUL-padded `--- x` and
+/// a NUL-padded `@@ -1` are equally an accident of the bytes a PNG happens to hold. Two of them
+/// are, and a caller judging a stream counts rather than weighs: every attempt to make a single
+/// line decisive has had to say what a diff may not open with, and each such rule refused a
+/// patch someone writes — a mail whose first header is not ASCII, a patch opening with a blank
+/// line, a path in another script.
+///
+/// Counting is only as strong as what it counts: a line taken on its head where its head is all
+/// there is to read hands binary data two lines as readily as a patch, so a header is taken that
+/// way exactly where reading further is not an option. Where it is an option the caller takes
+/// it: one holding the line this was read out of can ask, with
+/// [`the_header_a_path_follows_in`] and [`carries_something_past`], that the path be there — the
+/// binary's UTF-16 check does, since a line read no further than its first unit that is not
+/// ASCII leaves a bare header and a header a path follows spelled the same.
+pub fn reads_as_a_diff_line(line: &[u8]) -> bool {
+    says_what_its_marker_promises(line)
+        || the_header_a_path_follows_in(line).is_some()
+        || says_what_its_header_promises(line)
+}
+
+/// The header a path follows that opens `line`, the longest of them where one opens another.
+///
+/// Not part of the library contract, and public for the reason [`markers`] is: the binary's
+/// UTF-16 check weighs such a header against the line it read it out of, and needs to know
+/// which header that is. Looked up here rather than there, so that the list is read by one rule
+/// — a lookup written out beside the check would be free to take the first that opens the line,
+/// and the length of what it found is what decides how much of the line counts as said past it.
+#[doc(hidden)]
+pub fn the_header_a_path_follows_in(line: &[u8]) -> Option<&'static [u8]> {
+    longest_prefix(headers_a_path_follows(), line)
+}
+
+/// Every extended header a path follows, the ones read on their own head.
+///
+/// Not part of the library contract, and public for the reason [`markers`] is: the binary is a
+/// separate crate, and its cases weighing what the count of two rests on have to name the
+/// headers they try. Written out there, the set answered for whichever of the four happened to
+/// be named and was free to stay that way as the list grew. The check itself asks
+/// [`the_header_a_path_follows_in`], which reads this list by the rule the parser reads it by.
+#[doc(hidden)]
+pub fn headers_a_path_follows() -> impl Iterator<Item = &'static [u8]> {
+    HEADERS_A_PATH_FOLLOWS.iter().copied()
+}
+
+/// Every extended header whose line is ASCII past it, so that a caller weighing one is weighing
+/// the same set the parser does.
+///
+/// Not part of the library contract, and public for the reason [`markers`] is: the binary is a
+/// separate crate, and its test that two bare headers say nothing has to name the headers it
+/// tries. Written out there, the set answered for three of the seven and was free to stay that
+/// way as the list grew.
+#[doc(hidden)]
+pub fn headers_ascii_follows() -> impl Iterator<Item = &'static [u8]> {
+    HEADERS_ASCII_FOLLOWS.iter().copied()
+}
+
+/// Whether `line` opens with a header that ASCII follows and carries something past it that is
+/// not whitespace — the reading [`says_what_its_marker_promises`] gives a marker, given to the
+/// headers it can be given to.
+fn says_what_its_header_promises(line: &[u8]) -> bool {
+    longest_prefix(headers_ascii_follows(), line)
+        .is_some_and(|header| carries_something_past(line, header))
+}
+
+/// The line that opens a hunk, named apart from the list it belongs to: it is the one marker
+/// whose line the parser reads in full, so [`says_what_its_marker_promises`] branches on it, and
+/// a marker written out a second time there would leave that branch behind if this one changed.
+const HUNK_HEADER_MARKER: &[u8] = b"@@ ";
+
+/// The lines that open a file entry or a hunk in an ordinary diff.
+const ORDINARY_MARKERS: [&[u8]; 5] = [
+    b"diff --git ",
+    b"--- ",
+    b"+++ ",
+    HUNK_HEADER_MARKER,
+    b"Binary files ",
+];
+
+/// The lines that mark a combined diff: the header git writes for a merge (`diff --cc`,
+/// `diff --combined`) and its hunk header, which has one `@` per side plus one (`@@@ -1,3 -1,3
 /// +1,3 @@@` for two parents).
+const COMBINED_MARKERS: [&[u8]; 3] = [b"diff --cc ", b"diff --combined ", b"@@@"];
+
+/// Whether the line marks a combined diff.
 fn is_combined_marker(line: &[u8]) -> bool {
-    line.starts_with(b"diff --cc ")
-        || line.starts_with(b"diff --combined ")
-        || line.starts_with(b"@@@")
+    COMBINED_MARKERS.iter().any(|m| line.starts_with(m))
 }
 
 /// Open a file entry from a `diff --git a/x b/y` line. The paths are seeded from the command
@@ -527,6 +723,96 @@ mod tests {
     use super::*;
     use crate::emit::emit;
     use crate::model::{FileContent, LineKind};
+
+    /// The longest prefix that opens the line is the one reported, whichever order the prefixes
+    /// are listed in. No member of either list the parser weighs a line against opens another
+    /// today, so the rule has nothing to bite on there — and a rule nothing exercises is one
+    /// nobody finds out has stopped working. Given a pair where one prefix does open the other,
+    /// the reading is checked directly.
+    #[test]
+    fn the_longest_prefix_that_opens_a_line_is_the_one_reported() {
+        let prefixes: [&'static [u8]; 2] = [b"@@ ", b"@@ -"];
+        let line = b"@@ -1 +1 @@";
+        assert_eq!(
+            longest_prefix(prefixes.into_iter(), line),
+            Some(b"@@ -".as_slice())
+        );
+        assert_eq!(
+            longest_prefix(prefixes.into_iter().rev(), line),
+            Some(b"@@ -".as_slice())
+        );
+    }
+
+    /// A tail is what stands past the prefix, which is a reading only where the prefix opens the
+    /// line. Asked where it does not, the answer is that nothing stands past it: a prefix the
+    /// line does not carry carries nothing of the line with it.
+    ///
+    /// Asked of a prefix longer than the line and of one shorter than it: read by length alone,
+    /// the first is refused and the second hands back a tail measured off a prefix that is not
+    /// there.
+    #[test]
+    fn a_prefix_that_does_not_open_a_line_carries_nothing() {
+        assert!(!carries_something_past(b"@@", b"@@ -1 +1 @@"));
+        assert!(!carries_something_past(b"index 100", b"--- "));
+    }
+
+    /// What a marker promises is a path or a header, and no arrangement of whitespace is either.
+    /// A caller that hands over a line whole passes the line ending the stream wrote with it, and
+    /// counting that ending as content past the marker makes every bare marker line say
+    /// something — the case this rule exists to refuse.
+    ///
+    /// Asked of both lists a line is weighed against, and of each of their members, through the
+    /// one reading a caller has: the rule is one, and a rule that held for a marker while a
+    /// header kept the reading it had would let [`reads_as_a_diff_line`] answer the same tail
+    /// two ways. Asking the two lists at two levels would leave that promise resting on this
+    /// comment.
+    #[test]
+    fn a_prefix_followed_only_by_whitespace_promises_nothing() {
+        for tail in ["\n", "\r\n", "\x0c", "\t", " "] {
+            for marker in markers() {
+                let line = [marker, tail.as_bytes()].concat();
+                let bare = String::from_utf8_lossy(marker);
+                assert!(!reads_as_a_diff_line(&line), "`{bare}` and {tail:?}");
+            }
+            for header in headers_ascii_follows() {
+                let line = [header, tail.as_bytes()].concat();
+                let bare = String::from_utf8_lossy(header);
+                assert!(!reads_as_a_diff_line(&line), "`{bare}` and {tail:?}");
+            }
+        }
+    }
+
+    /// A header whose line is ASCII past it — an object name, a mode, a percentage — is read the
+    /// way a marker is: a bare `index ` says as little about the stream it was read out of as a
+    /// bare `--- ` does, and two of them are what binary data holds as readily as a patch. Only
+    /// the headers a path follows stand on their own head, because a path may be in any script
+    /// and is not there to be read.
+    #[test]
+    fn a_bare_header_says_something_only_where_a_path_follows_it() {
+        for header in headers_a_path_follows() {
+            let bare = String::from_utf8_lossy(header);
+            assert!(reads_as_a_diff_line(header), "bare `{bare}`");
+        }
+        for header in headers_ascii_follows() {
+            let bare = String::from_utf8_lossy(header);
+            assert!(!reads_as_a_diff_line(header), "bare `{bare}`");
+            assert!(
+                !reads_as_a_diff_line(&[header, b"\r\n".as_slice()].concat()),
+                "`{bare}` and the line ending a patch written under Windows leaves"
+            );
+            assert!(
+                reads_as_a_diff_line(&[header, b"1".as_slice()].concat()),
+                "`{bare}1`"
+            );
+        }
+        // The lines git writes, beside the tail each header is asked about above: what a header
+        // carries in a patch is longer than the one byte the loop appends, and a rule read off
+        // the shortest line that passes is a rule no patch was ever weighed against.
+        assert!(reads_as_a_diff_line(b"rename from f.txt"));
+        assert!(reads_as_a_diff_line(b"similarity index 100%"));
+        assert!(reads_as_a_diff_line(b"index 111..222 100644"));
+        assert!(!reads_as_a_diff_line(b"renamed the file"));
+    }
 
     const ONE: &str = "\
 diff --git a/f.txt b/f.txt
