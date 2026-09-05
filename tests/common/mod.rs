@@ -6,17 +6,13 @@ use assert_cmd::Command as Cli;
 use std::process::Command as Sys;
 use tempfile::TempDir;
 
-/// A `git` invocation in `dir`, insulated from the ambient git configuration: a developer's
+/// A `git` invocation in `dir`, insulated the way the tool insulates its own: a developer's
 /// settings — `diff.noprefix`, `core.autocrlf`, `diff.mnemonicPrefix` and the like — must not
-/// change the diffs these tests assert on, and the repository-locating variables must not point
-/// git at another tree. Both lists come from the crate, so the tests insulate exactly what the
-/// tool does.
+/// change the diffs these tests assert on, the repository-locating variables must not point git
+/// at another tree, and the messages must come back in one language. The command is built by the
+/// crate, so the tests insulate exactly what the tool does.
 pub fn git(dir: &TempDir) -> Sys {
-    let mut cmd = Sys::new("git");
-    cmd.current_dir(dir.path());
-    hunkpick::gitenv::insulate_config(&mut cmd, dir.path());
-    hunkpick::gitenv::insulate_repo_location(&mut cmd);
-    cmd
+    hunkpick::gitenv::insulated_git(dir.path())
 }
 
 /// Run `git` in `dir` with `args`, feeding `stdin_bytes` on stdin, and return its output.
@@ -108,17 +104,29 @@ pub fn apply_diff(dir: &TempDir, args: &[&str], diff: &[u8], what: &str) {
     );
 }
 
-/// Run hunkpick with `args` and `stdin`, assert success, return stdout bytes.
-pub fn run_ok(args: &[&str], stdin: &str) -> Vec<u8> {
+/// Run hunkpick with `args` and `stdin`, and return the assertion so a caller can state what it
+/// expects of the run — the exit code, the output, the diagnosis on stderr.
+///
+/// The stream is taken as bytes rather than as text: what these tests hand the binary includes
+/// content that is not UTF-8 and windows that are not text at all.
+pub fn run(args: &[&str], stdin: impl AsRef<[u8]>) -> assert_cmd::assert::Assert {
     Cli::cargo_bin("hunkpick")
         .unwrap()
         .args(args)
-        .write_stdin(stdin.to_string())
+        .write_stdin(stdin.as_ref().to_vec())
         .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone()
+}
+
+/// The stdout of a run that succeeded. Named once so every helper here that returns output takes
+/// it the same way; the tests that read `get_output` themselves are not this module's to answer
+/// for.
+pub fn stdout_of(assert: assert_cmd::assert::Assert) -> Vec<u8> {
+    assert.success().get_output().stdout.clone()
+}
+
+/// Run hunkpick with `args` and `stdin`, assert success, return stdout bytes.
+pub fn run_ok(args: &[&str], stdin: impl AsRef<[u8]>) -> Vec<u8> {
+    stdout_of(run(args, stdin))
 }
 
 /// The `list --json` listing of `diff`, parsed. Every caller that reads the listing needs both
@@ -138,23 +146,17 @@ pub fn run_ok_text(args: &[&str], stdin: &str) -> String {
 /// The five-argument invocation is what most of these tests are made of; spelled out per test it
 /// buries which selector is being exercised under identical scaffolding.
 pub fn select_checked(dir: &TempDir, diff: &str, selectors: &[&str]) -> assert_cmd::assert::Assert {
-    let mut cmd = Cli::cargo_bin("hunkpick").unwrap();
-    cmd.arg("select");
-    cmd.args(selectors);
-    cmd.args([
+    let mut args = vec!["select"];
+    args.extend_from_slice(selectors);
+    args.extend_from_slice(&[
         "--verify-result-diff-git",
         "-C",
         dir.path().to_str().unwrap(),
     ]);
-    cmd.write_stdin(diff.to_string()).assert()
+    run(&args, diff)
 }
 
 /// [`select_checked`] for the usual case: the selection must succeed. Returns its stdout.
 pub fn select_checked_ok(dir: &TempDir, diff: &str, selectors: &[&str]) -> String {
-    let out = select_checked(dir, diff, selectors)
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    String::from_utf8(out).unwrap()
+    String::from_utf8(stdout_of(select_checked(dir, diff, selectors))).unwrap()
 }
