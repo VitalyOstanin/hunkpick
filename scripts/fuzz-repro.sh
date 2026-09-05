@@ -11,7 +11,7 @@
 # RUSTUP_TOOLCHAIN and the spelled-out triple are needed here for the reasons
 # CONTRIBUTING.md gives in its "Fuzzing" section, the same ones fuzz-all.sh runs
 # under.
-set -uo pipefail
+set -euo pipefail
 
 TRIPLE="${FUZZ_TRIPLE:-x86_64-unknown-linux-gnu}"
 export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}"
@@ -20,5 +20,5 @@ for artifact in fuzz/artifacts/*/*; do
     [ -e "$artifact" ] || continue
     target="$(basename "$(dirname "$artifact")")"
     printf '== %s: %s\n' "$target" "$artifact"
-    cargo fuzz run --target "$TRIPLE" "$target" "$artifact" || exit 1
+    cargo fuzz run --target "$TRIPLE" "$target" "$artifact"
 done

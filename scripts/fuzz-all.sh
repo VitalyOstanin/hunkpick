@@ -18,7 +18,7 @@
 # back from wherever the run happened -- a crash is by definition the run that
 # did not succeed. The base64 dump into the log is enough to reconstruct the
 # input elsewhere.
-set -uo pipefail
+set -euo pipefail
 
 TARGETS=(parse roundtrip selectors)
 if [ "$#" -gt 0 ]; then
@@ -29,7 +29,7 @@ SECONDS_PER_TARGET="${FUZZ_SECONDS:-300}"
 export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}"
 
 for target in "${TARGETS[@]}"; do
-    mkdir -p "fuzz/corpus/${target}" || exit 1
+    mkdir -p "fuzz/corpus/${target}"
     # A target reads either its own seeds (selectors: diff, NUL, selector lines) or the
     # shared set of plain diffs, which parse and roundtrip both take as-is.
     seeds="fuzz/seeds/${target}"
@@ -45,7 +45,16 @@ for target in "${TARGETS[@]}"; do
         for artifact in "fuzz/artifacts/${target}"/*; do
             [ -e "$artifact" ] || continue
             printf '== %s\n' "$artifact"
-            base64 -w0 "$artifact"
+            # The dump is the diagnosis, and -e is on: a base64 that cannot write this
+            # artifact would end the script here, taking the artifacts after it and the
+            # exit below with it. A missing dump is worth less than a truncated report, so
+            # the failure is said twice: on its own line in the report, where base64 may
+            # already have written part of the dump and -w0 leaves no newline to separate
+            # them, and on stderr in the form the rest of the scripts report an error in.
+            base64 -w0 "$artifact" || {
+                printf '\n<base64 failed>'
+                echo "error: base64 could not dump $artifact" >&2
+            }
             printf '\n'
         done
         exit 1
