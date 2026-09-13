@@ -20,6 +20,7 @@ added as a new ADR that supersedes the earlier one rather than editing it in pla
 | [0011](0011-rust-2024-edition.md)              | Rust 2024 edition, including its style edition                        | Accepted | 2026-08-17 |
 | [0012](0012-two-sided-diffs-only.md)           | Only two-sided unified diffs; a combined diff is rejected             | Accepted | 2026-08-17 |
 | [0013](0013-exit-code-contract.md)             | Exit-code contract: the input's fault, the tool's fault, and a closed pipe | Accepted | 2026-08-17 |
+| [0014](0014-listing-publishes-the-changed-line-numbering.md) | The listing publishes the changed-line numbering, and narrows itself | Accepted | 2026-09-13 |
 
 ## Adding a new ADR
 

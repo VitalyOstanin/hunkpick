@@ -14,6 +14,10 @@ Examples:
   # Machine-readable listing (adds id_count: how many sub-hunks share an id)
   git diff src/main.rs | hunkpick list --json
 
+  # Show a sub-hunk's changed lines with the numbering `select ... @L` takes,
+  # narrowed to the one sub-hunk being cut (repeat --only to name several)
+  git diff src/main.rs | hunkpick list --lines --only 8
+
   # Stage sub-hunks 1 and 3 of a single-file diff
   git diff src/main.rs | hunkpick select 1,3 | git apply --cached
 
@@ -29,11 +33,11 @@ Examples:
   git diff src/lib.rs | hunkpick split 1 --at 5
 
   # Split a sub-hunk by individual changed lines (@L numbers the +/- lines 1..N,
-  # see `list --json` changed_lines). @L keeps both leading and trailing context
-  # so a subset applies with no boundary restriction (two exceptions; see
-  # `hunkpick select --help`). Split an addition-only block of 120 lines across
-  # commits, one piece per round. The re-diff shows only what is left, renumbered
-  # from 1, so the second round asks for 1-30 rather than 91-120:
+  # see `list --lines`, or changed_lines in `list --json`). @L keeps both leading
+  # and trailing context so a subset applies with no boundary restriction (two
+  # exceptions; see `hunkpick select --help`). Split an addition-only block of
+  # 120 lines across commits, one piece per round. The re-diff shows only what is
+  # left, renumbered from 1, so the second round asks for 1-30, not 91-120:
   git diff src/lib.rs | hunkpick select 1@L1-90 | git apply --cached
   git diff src/lib.rs | hunkpick select 1@L1-30 | git apply --cached
 
@@ -157,10 +161,38 @@ pub enum Command {
     /// bytes, bidirectional overrides). The JSON listing does not: its text fields carry the
     /// diff's own content, so a consumer printing them to a terminal must escape them. Those
     /// fields are also lossy for non-UTF-8 bytes; address such a file by its content id.
+    ///
+    /// `--lines` prints each sub-hunk's changed lines under its header line, numbered the way
+    /// `select INDEX@L<set>` numbers them, and `--only` narrows the listing to the sub-hunks
+    /// given selectors address. Neither renumbers anything: what a narrowed listing shows is
+    /// what the full one shows, minus the rest.
     List {
         /// Emit machine-readable JSON instead of the human listing.
         #[arg(long)]
         json: bool,
+        /// Print each sub-hunk's changed (+/-) lines under its header line.
+        ///
+        /// Each line shows its 1-based index within the sub-hunk, its kind (+ or -) and its
+        /// text; that index is what `select INDEX@L<set>` takes, with no translation step in
+        /// between. Whole sub-hunks are picked by the index in brackets, as before. Not
+        /// accepted with --json, which already carries this under changed_lines.
+        #[arg(long, conflicts_with = "json")]
+        lines: bool,
+        /// List only the sub-hunks this selector addresses (same grammar as `select`).
+        ///
+        /// Takes one selector: N, N,M, A-B, path:N, path:*, * or @ID, exactly as `select` reads
+        /// them. Repeat the flag to name several (--only src/a.rs:1 --only src/b.rs:2); one
+        /// value per flag, so a stray argument is still reported as one rather than read as a
+        /// selector. The INDEX@L<set> form is not accepted: it addresses changed lines within a
+        /// sub-hunk, not a sub-hunk to list. A selector that matches nothing -- an unknown path,
+        /// an index the file does not have, an id no sub-hunk carries -- is a usage error
+        /// (exit 2), not an empty listing. Indices and ids keep the values the full listing
+        /// shows, and with --json the schema is unchanged (id_count still counts the whole
+        /// patch), so a selector read off a narrowed listing addresses the same sub-hunk.
+        // OsString for the same reason as the `select` selectors: a path that is not valid
+        // UTF-8 has to stay spellable.
+        #[arg(long, value_name = "SELECTOR")]
+        only: Vec<OsString>,
         /// Colour the human listing: `auto` (a terminal, unless NO_COLOR is set), `always`
         /// or `never`. CLICOLOR_FORCE forces colour in `auto`. `--json` is never coloured.
         #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
@@ -192,7 +224,9 @@ pub enum Command {
         ///
         /// In INDEX@L<set> only a numeric index may precede '@' (not @id, not *), and the set
         /// numbers the sub-hunk's changed lines 1..N in body order: deletions and additions
-        /// share one numbering, as shown by `list --json`'s changed_lines. The cut keeps both
+        /// share one numbering, printed by `list --lines` (and reported by `list --json` under
+        /// changed_lines). To read the numbering of one sub-hunk on a large diff, run
+        /// `list --lines --only INDEX`. The cut keeps both
         /// leading and trailing context, so a subset applies with no boundary restriction,
         /// except on an entry that deletes the file (+++ /dev/null), where a partial subset is
         /// a usage error, and for a piece left with no context at all (whole-file replacement,
@@ -353,6 +387,38 @@ mod tests {
             }
             _ => panic!("expected select"),
         }
+    }
+
+    #[test]
+    fn list_takes_the_detail_flag_and_several_only_selectors() {
+        // One selector per flag, repeated: a stray argument then stays a stray argument rather
+        // than being swallowed as another selector.
+        let cli = Cli::try_parse_from([
+            "hunkpick", "list", "--lines", "--only", "a:1", "--only", "b:2",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::List {
+                json, lines, only, ..
+            } => {
+                assert!(lines);
+                assert!(!json);
+                assert_eq!(
+                    only,
+                    vec![OsString::from("a:1"), OsString::from("b:2")],
+                    "both selectors reach the command"
+                );
+            }
+            _ => panic!("expected list"),
+        }
+    }
+
+    #[test]
+    fn only_does_not_swallow_a_following_argument() {
+        // With a greedy arity `list --only 1 --jsn` read `--jsn` as a second selector; a stray
+        // argument has to come back as one.
+        let res = Cli::try_parse_from(["hunkpick", "list", "--only", "1", "stray"]);
+        assert!(res.is_err(), "a stray argument must be rejected");
     }
 
     #[test]

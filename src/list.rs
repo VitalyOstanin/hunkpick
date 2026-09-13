@@ -1,6 +1,6 @@
 use crate::emit::{fmt_range, section_text};
 use crate::model::*;
-use crate::select::build_view;
+use crate::select::{SubhunkFilter, build_view};
 use crate::subhunk_id::{format_id, subhunk_hash, subhunk_id};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -96,6 +96,13 @@ fn preview(h: &Hunk) -> String {
 /// The addressable sub-hunks of `patch` as pretty-printed JSON: an array of files, each with
 /// its sub-hunks (1-based `index`, content `id`, `id_count`, line ranges, changed lines).
 ///
+/// [`ListOptions::filter`] narrows the listing to the sub-hunks it holds (`list --only`), leaving
+/// every field as it is in the full listing: `index` keeps numbering the file's sub-hunks and
+/// `id_count` keeps counting the whole patch, so a selector read off a narrowed listing addresses
+/// the same sub-hunk as one read off the full one. The other options do not apply here: colour is
+/// never written into JSON, and the changed lines [`ListOptions::lines`] prints are in the schema
+/// unconditionally, under `changed_lines`.
+///
 /// Text fields (`path`, `header`, `preview`, `changed_lines[].text`) report the diff's own
 /// content and are deliberately not display-sanitised the way [`list_human`] sanitises its
 /// output: JSON escaping hides control characters but not bidirectional overrides, which come
@@ -103,7 +110,7 @@ fn preview(h: &Hunk) -> String {
 /// escape them itself. They are also lossy for bytes that are not valid UTF-8 (JSON must be
 /// UTF-8), so a path read from here does not necessarily round-trip into a `path:N` selector —
 /// the content `id` is the exact handle for such a file.
-pub fn list_json(patch: &Patch) -> String {
+pub fn list_json(patch: &Patch, opts: &ListOptions<'_>) -> String {
     let view = build_view(patch);
     // Hash each sub-hunk once, keeping the per-file hashes alongside the view so the second
     // pass reuses them instead of recomputing. `hashes[fi][si]` is the hash of the `si`-th
@@ -124,6 +131,7 @@ pub fn list_json(patch: &Patch) -> String {
     let files: Vec<JsonFile> = view
         .iter()
         .enumerate()
+        .filter(|(fi, _)| shows_file(opts.filter, *fi))
         .map(|(fi, subs)| {
             let f = &patch.files[fi];
             JsonFile {
@@ -132,6 +140,7 @@ pub fn list_json(patch: &Patch) -> String {
                 hunks: subs
                     .iter()
                     .enumerate()
+                    .filter(|(i, _)| shows_subhunk(opts.filter, fi, i + 1))
                     .map(|(i, h)| json_hunk(h, i, hashes[fi][i], &counts))
                     .collect(),
             }
@@ -162,6 +171,16 @@ fn json_hunk(h: &Hunk, index: usize, hash: u64, counts: &HashMap<u64, usize>) ->
         header: header_string(h),
         preview: preview(h),
     }
+}
+
+/// Whether `filter` lets file `fi` into the listing. No filter lists everything.
+fn shows_file(filter: Option<&SubhunkFilter>, fi: usize) -> bool {
+    filter.is_none_or(|f| f.contains_key(&fi))
+}
+
+/// Whether `filter` lets the `index`-th (1-based) sub-hunk of file `fi` into the listing.
+fn shows_subhunk(filter: Option<&SubhunkFilter>, fi: usize, index: usize) -> bool {
+    filter.is_none_or(|f| f.get(&fi).is_some_and(|picked| picked.contains(&index)))
 }
 
 // SGR (Select Graphic Rendition) parameter codes used for the human-readable listing.
@@ -200,13 +219,37 @@ fn paint(s: &str, code: &str, color: bool) -> String {
     }
 }
 
+/// What a listing shows and how. Both [`list_human`] and [`list_json`] take it, so a later
+/// listing option changes this type rather than either signature; the JSON listing reads only
+/// [`ListOptions::filter`], since colour has no meaning there and the per-line detail is part of
+/// its schema already.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ListOptions<'a> {
+    /// Colour the listing with SGR sequences.
+    pub color: bool,
+    /// Print each sub-hunk's changed lines under its header line, numbered the way
+    /// `select INDEX@L<set>` numbers them.
+    pub lines: bool,
+    /// List only the files and sub-hunks this filter holds; `None` lists everything. Built by
+    /// [`crate::select::resolve_subhunk_filter`] from the same selectors `select` takes.
+    pub filter: Option<&'a SubhunkFilter>,
+}
+
 /// The addressable sub-hunks of `patch` for a terminal: one line per sub-hunk with its index,
 /// content id, `@@` header, change counts, the `[+add]` marker and a preview of the first
-/// changed line. Control bytes from the diff are escaped; `color` adds SGR sequences.
-pub fn list_human(patch: &Patch, color: bool) -> String {
+/// changed line, and — with [`ListOptions::lines`] — that sub-hunk's changed lines underneath.
+/// Control bytes from the diff are escaped; [`ListOptions::color`] adds SGR sequences.
+///
+/// A filtered listing keeps the numbering of the full one: the sub-hunks left out are skipped,
+/// not renumbered, so an index read here addresses the same sub-hunk in `select`.
+pub fn list_human(patch: &Patch, opts: &ListOptions<'_>) -> String {
+    let color = opts.color;
     let view = build_view(patch);
     let mut out = String::new();
     for (fi, subs) in view.iter().enumerate() {
+        if !shows_file(opts.filter, fi) {
+            continue;
+        }
         let f = &patch.files[fi];
         out.push_str(&sanitize(&f.display_path()));
         if matches!(f.content, FileContent::Binary(_)) {
@@ -215,6 +258,9 @@ pub fn list_human(patch: &Patch, color: bool) -> String {
         }
         out.push('\n');
         for (i, h) in subs.iter().enumerate() {
+            if !shows_subhunk(opts.filter, fi, i + 1) {
+                continue;
+            }
             let (added, deleted) = h.change_counts();
             let idx = paint(&format!("[{}]", i + 1), SGR_BOLD, color);
             let id = subhunk_id(f, h);
@@ -234,9 +280,37 @@ pub fn list_human(patch: &Patch, color: bool) -> String {
                 "  {idx} {id} {}  +{added} -{deleted}{marker}  {pv}",
                 sanitize(&header_string(h))
             );
+            if opts.lines {
+                write_changed_lines(&mut out, h);
+            }
         }
     }
     out
+}
+
+/// The sub-hunk's changed (`+`/`-`) lines under its header line, one per line: the 1-based index
+/// `select INDEX@L<set>` addresses it by, the kind, and the text. The numbering is
+/// [`Hunk::changed_lines`], the same source `list --json` and the `@L` cut read, so what is
+/// printed is what a selector takes — with no translation step in between.
+///
+/// Printed whole: a long sub-hunk is exactly the one an `@L` cut is needed for, and an elision
+/// would hide the numbers the caller came for. Not coloured either: the kind stands in a column
+/// of its own, and the line carries no other mark to distinguish.
+fn write_changed_lines(out: &mut String, h: &Hunk) {
+    // Right-align the indices on the widest of them, so the kind column stays a column. The
+    // width comes from the numbering itself, not from the `+N -M` counts: the two agree today,
+    // and taking the width from a second source would let a later change to either of them
+    // shift the column without anything saying so.
+    let width = h.changed_lines().count().to_string().len();
+    for (i, l) in h.changed_lines() {
+        let kind = match l.kind {
+            LineKind::Add => '+',
+            LineKind::Del => '-',
+            LineKind::Context => unreachable!("context lines are filtered out"),
+        };
+        let text = sanitize(&String::from_utf8_lossy(&l.text));
+        let _ = writeln!(out, "      {i:>width$} {kind} {text}");
+    }
 }
 
 #[cfg(test)]
@@ -268,7 +342,7 @@ diff --git a/f b/f
 +plain
 ";
         let p = parse(src.as_bytes()).unwrap();
-        let out = list_human(&p, false);
+        let out = list_human(&p, &ListOptions::default());
         assert!(
             !out.contains('\u{1b}'),
             "no raw ESC in the listing: {out:?}"
@@ -315,7 +389,8 @@ diff --git a/f b/f
     #[test]
     fn json_id_count_is_one_for_unique_ids() {
         let p = parse(TWO_CHANGES.as_bytes()).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&list_json(&p, &ListOptions::default())).unwrap();
         assert_eq!(v[0]["hunks"][0]["id_count"], 1);
         assert_eq!(v[0]["hunks"][1]["id_count"], 1);
     }
@@ -323,7 +398,8 @@ diff --git a/f b/f
     #[test]
     fn json_id_count_marks_duplicates() {
         let p = parse(DUP.as_bytes()).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&list_json(&p, &ListOptions::default())).unwrap();
         let hunks = &v[0]["hunks"];
         assert_eq!(
             hunks[0]["id"], hunks[1]["id"],
@@ -336,7 +412,7 @@ diff --git a/f b/f
     #[test]
     fn json_has_two_subhunks() {
         let p = parse(TWO_CHANGES.as_bytes()).unwrap();
-        let j = list_json(&p);
+        let j = list_json(&p, &ListOptions::default());
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v[0]["path"], "f");
         assert_eq!(v[0]["hunks"].as_array().unwrap().len(), 2);
@@ -346,7 +422,7 @@ diff --git a/f b/f
     #[test]
     fn json_includes_subhunk_id() {
         let p = parse(TWO_CHANGES.as_bytes()).unwrap();
-        let j = list_json(&p);
+        let j = list_json(&p, &ListOptions::default());
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         let id = v[0]["hunks"][0]["id"].as_str().expect("id field present");
         assert_eq!(id.len(), 16, "id must be 16 hex chars");
@@ -358,7 +434,7 @@ diff --git a/f b/f
     #[test]
     fn human_shows_subhunk_id() {
         let p = parse(TWO_CHANGES.as_bytes()).unwrap();
-        let out = list_human(&p, false);
+        let out = list_human(&p, &ListOptions::default());
         let view = build_view(&p);
         let id = subhunk_id(&p.files[0], &view[0][0]);
         assert!(
@@ -370,7 +446,7 @@ diff --git a/f b/f
     #[test]
     fn human_lists_indices() {
         let p = parse(TWO_CHANGES.as_bytes()).unwrap();
-        let out = list_human(&p, false);
+        let out = list_human(&p, &ListOptions::default());
         assert!(out.contains("f"));
         assert!(out.contains("[1]"));
         assert!(out.contains("[2]"));
@@ -389,21 +465,23 @@ new file mode 100644
     #[test]
     fn json_marks_addition_only() {
         let p = parse(NEW_FILE.as_bytes()).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&list_json(&p, &ListOptions::default())).unwrap();
         assert_eq!(v[0]["hunks"][0]["addition_only"], true);
     }
 
     #[test]
     fn json_addition_only_false_for_mixed() {
         let p = parse(TWO_CHANGES.as_bytes()).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&list_json(&p, &ListOptions::default())).unwrap();
         assert_eq!(v[0]["hunks"][0]["addition_only"], false);
     }
 
     #[test]
     fn human_marks_addition_only() {
         let p = parse(NEW_FILE.as_bytes()).unwrap();
-        let out = list_human(&p, false);
+        let out = list_human(&p, &ListOptions::default());
         assert!(
             out.contains("[+add]"),
             "addition-only marker missing:\n{out}"
@@ -413,7 +491,7 @@ new file mode 100644
     #[test]
     fn human_no_marker_for_mixed() {
         let p = parse(TWO_CHANGES.as_bytes()).unwrap();
-        let out = list_human(&p, false);
+        let out = list_human(&p, &ListOptions::default());
         assert!(
             !out.contains("[+add]"),
             "addition-only marker must not appear for a mixed sub-hunk:\n{out}"
@@ -425,7 +503,8 @@ new file mode 100644
         // The first sub-hunk of TWO_CHANGES is the b->B change: one deletion, one addition,
         // numbered 1 and 2 in body order (deletion first).
         let p = parse(TWO_CHANGES.as_bytes()).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&list_json(&p, &ListOptions::default())).unwrap();
         let cl = &v[0]["hunks"][0]["changed_lines"];
         assert_eq!(cl.as_array().unwrap().len(), 2);
         assert_eq!(cl[0]["i"], 1);
@@ -454,7 +533,8 @@ diff --git a/f b/f
             .as_bytes(),
         )
         .unwrap();
-        let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&list_json(&p, &ListOptions::default())).unwrap();
         let cl = v[0]["hunks"][0]["changed_lines"]
             .as_array()
             .unwrap()
@@ -480,8 +560,239 @@ diff --git a/f b/f
             .as_bytes(),
         )
         .unwrap();
-        let v: serde_json::Value = serde_json::from_str(&list_json(&p)).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&list_json(&p, &ListOptions::default())).unwrap();
         assert_eq!(v[0]["hunks"][0]["addition_only"], false);
-        assert!(!list_human(&p, false).contains("[+add]"));
+        assert!(!list_human(&p, &ListOptions::default()).contains("[+add]"));
+    }
+
+    const TWO_FILES: &str = "\
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1,3 +1,3 @@
+ a
+-x
++X
+ b
+diff --git a/b.rs b/b.rs
+--- a/b.rs
++++ b/b.rs
+@@ -1,3 +1,3 @@
+ a
+-y
++Y
+ b
+";
+
+    /// The filter `list --only` builds: file `fi` of the patch, showing the 1-based sub-hunk
+    /// `indices` named for it (empty for a binary entry, which has none).
+    fn only(fi: usize, indices: &[usize]) -> SubhunkFilter {
+        let mut f = SubhunkFilter::new();
+        f.insert(fi, indices.iter().copied().collect());
+        f
+    }
+
+    #[test]
+    fn human_lines_carry_the_numbering_the_json_listing_reports() {
+        // The whole point of the detail: a caller must be able to read an `@L` index off the
+        // human listing instead of pulling `changed_lines` out of the JSON one.
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
+        let out = list_human(
+            &p,
+            &ListOptions {
+                lines: true,
+                ..Default::default()
+            },
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&list_json(&p, &ListOptions::default())).unwrap();
+        for hi in 0..2 {
+            for entry in v[0]["hunks"][hi]["changed_lines"].as_array().unwrap() {
+                let i = entry["i"].as_u64().unwrap();
+                let kind = if entry["kind"] == "add" { '+' } else { '-' };
+                let text = entry["text"].as_str().unwrap();
+                let expected = format!("{i} {kind} {text}");
+                assert!(
+                    out.lines().any(|l| l.trim_start() == expected),
+                    "detail line {expected:?} missing from:\n{out}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn human_lines_are_off_by_default() {
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
+        let out = list_human(&p, &ListOptions::default());
+        assert_eq!(
+            out.lines().count(),
+            3,
+            "one path line and two sub-hunk lines expected:\n{out}"
+        );
+    }
+
+    #[test]
+    fn human_lines_right_align_the_indices() {
+        // Ten changed lines: the kind column must stay a column, so `1` is padded to the width
+        // of `10` rather than shifting the rest of the line.
+        let mut src = String::from("--- a/f\n+++ b/f\n@@ -1,10 +1,10 @@\n");
+        for i in 0..10 {
+            src.push_str(&format!("-l{i}\n"));
+        }
+        for i in 0..10 {
+            src.push_str(&format!("+L{i}\n"));
+        }
+        let p = parse(src.as_bytes()).unwrap();
+        let out = list_human(
+            &p,
+            &ListOptions {
+                lines: true,
+                ..Default::default()
+            },
+        );
+        // Twenty changed lines in body order: the ten deletions are 1..10, the ten additions
+        // 11..20, so the widest index is two digits and `1` is padded to it.
+        assert!(
+            out.contains("       1 - l0\n"),
+            "padded first index:\n{out}"
+        );
+        assert!(
+            out.contains("      10 - l9\n"),
+            "widest deletion index:\n{out}"
+        );
+        assert!(out.contains("      20 + L9\n"), "widest index:\n{out}");
+    }
+
+    #[test]
+    fn human_lines_escape_terminal_control_sequences() {
+        // The detail prints diff content, so it is escaped exactly as the rest of the listing.
+        let src = "\
+--- a/f
++++ b/f
+@@ -1 +1 @@
+-\x1b[31mred\u{202e}reversed
++plain
+";
+        let p = parse(src.as_bytes()).unwrap();
+        let out = list_human(
+            &p,
+            &ListOptions {
+                lines: true,
+                ..Default::default()
+            },
+        );
+        assert!(!out.contains('\u{1b}'), "no raw ESC: {out:?}");
+        assert!(!out.contains('\u{202e}'), "no bidi override: {out:?}");
+        assert!(out.contains("\\x1b"), "escaped ESC expected: {out:?}");
+        assert!(out.contains("\\u{202e}"), "escaped override: {out:?}");
+    }
+
+    #[test]
+    fn a_filtered_human_listing_keeps_the_full_numbering() {
+        // Skipping a sub-hunk must not renumber the ones that remain: the index printed here is
+        // the index `select` takes.
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
+        let out = list_human(
+            &p,
+            &ListOptions {
+                filter: Some(&only(0, &[2])),
+                ..Default::default()
+            },
+        );
+        assert!(out.contains("[2]"), "the addressed index stays 2:\n{out}");
+        assert!(
+            !out.contains("[1]"),
+            "the other sub-hunk is left out:\n{out}"
+        );
+        assert!(
+            out.contains("-d"),
+            "sub-hunk 2 is the d -> D change, previewed by its deletion:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_filter_leaves_out_a_file_it_does_not_name() {
+        let p = parse(TWO_FILES.as_bytes()).unwrap();
+        let out = list_human(
+            &p,
+            &ListOptions {
+                filter: Some(&only(1, &[1])),
+                ..Default::default()
+            },
+        );
+        assert!(out.contains("b.rs"), "the named file is listed:\n{out}");
+        assert!(!out.contains("a.rs"), "the other file is not:\n{out}");
+    }
+
+    #[test]
+    fn a_filtered_json_listing_keeps_index_and_id_count() {
+        // `id_count` counts the whole patch, filtered or not: it answers "would @id address more
+        // than this one", which the filter does not change.
+        let p = parse(DUP.as_bytes()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&list_json(
+            &p,
+            &ListOptions {
+                filter: Some(&only(0, &[2])),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        let hunks = v[0]["hunks"].as_array().unwrap();
+        assert_eq!(hunks.len(), 1, "one sub-hunk listed");
+        assert_eq!(hunks[0]["index"], 2, "the index is not renumbered");
+        assert_eq!(
+            hunks[0]["id_count"], 2,
+            "the id is still shared with the other"
+        );
+    }
+
+    #[test]
+    fn the_changed_line_detail_is_never_coloured() {
+        // ADR 0014: the kind stands in a column of its own, and colour marks the index and the
+        // preview. With colour on, the header line carries SGR and the detail lines do not.
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
+        let out = list_human(
+            &p,
+            &ListOptions {
+                color: true,
+                lines: true,
+                ..Default::default()
+            },
+        );
+        let mut header_lines = 0;
+        let mut detail_lines = 0;
+        for line in out.lines() {
+            if line.trim_start().starts_with('\u{1b}') {
+                header_lines += 1;
+            } else if line.starts_with("      ") {
+                detail_lines += 1;
+                assert!(!line.contains('\u{1b}'), "detail line coloured: {line:?}");
+            }
+        }
+        assert_eq!(header_lines, 2, "both sub-hunk lines are coloured:\n{out}");
+        assert_eq!(detail_lines, 4, "four changed lines printed:\n{out}");
+    }
+
+    #[test]
+    fn a_changed_line_that_is_not_utf8_is_shown_lossily() {
+        // The core is byte-oriented; only what the listing displays is decoded, and it is decoded
+        // lossily rather than refused. Such a file is addressed by its content id.
+        let mut src = b"--- a/f\n+++ b/f\n@@ -1 +1 @@\n-".to_vec();
+        src.extend_from_slice(&[0xff, 0xfe]);
+        src.extend_from_slice(b"\n+ok\n");
+        let p = parse(&src).unwrap();
+        let out = list_human(
+            &p,
+            &ListOptions {
+                lines: true,
+                ..Default::default()
+            },
+        );
+        assert!(
+            out.contains('\u{fffd}'),
+            "undecodable bytes become U+FFFD:\n{out}"
+        );
+        assert!(out.contains("+ ok"), "the other line is intact:\n{out}");
     }
 }

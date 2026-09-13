@@ -27,7 +27,13 @@ fn run() -> Result<(), AppError> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::List { json, color, input } => run_list(json, color, &input),
+        Command::List {
+            json,
+            lines,
+            only,
+            color,
+            input,
+        } => run_list(json, lines, &only, color, &input),
         Command::Select {
             selectors,
             input,
@@ -42,15 +48,34 @@ fn run() -> Result<(), AppError> {
     }
 }
 
-fn run_list(json: bool, color: ColorMode, input: &InputOpts) -> Result<(), AppError> {
+fn run_list(
+    json: bool,
+    lines: bool,
+    only: &[OsString],
+    color: ColorMode,
+    input: &InputOpts,
+) -> Result<(), AppError> {
     let Some(patch) = load_and_parse(input)? else {
         return Ok(());
     };
-    let use_color = hunkpick::cli::resolve_color(color);
-    let text = if json {
-        list::list_json(&patch)
+    // No `--only` means no filter at all, which is not the same as a filter that happens to
+    // hold everything: an empty selector list is a usage error in `select`, and the listing
+    // must not turn it into an empty listing.
+    let filter = if only.is_empty() {
+        None
     } else {
-        list::list_human(&patch, use_color)
+        let sels = select::parse_selectors(only).map_err(usage)?;
+        Some(select::resolve_subhunk_filter(&patch, &sels).map_err(usage)?)
+    };
+    let opts = list::ListOptions {
+        color: hunkpick::cli::resolve_color(color),
+        lines,
+        filter: filter.as_ref(),
+    };
+    let text = if json {
+        list::list_json(&patch, &opts)
+    } else {
+        list::list_human(&patch, &opts)
     };
     write_out(text.as_bytes())?;
     // Both forms end in a newline: the JSON document is a line of a stream as much as the human

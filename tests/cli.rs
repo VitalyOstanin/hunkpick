@@ -101,6 +101,91 @@ fn list_json_is_valid() {
     assert_eq!(hunks[1]["index"], 2);
 }
 
+/// The reason `list --lines` exists: the number printed beside a changed line is the number
+/// `select INDEX@L<set>` cuts by, with nothing to translate in between. Read one off the
+/// listing, hand it straight back, and exactly that line is staged.
+#[test]
+fn the_numbering_list_lines_prints_is_the_numbering_select_takes() {
+    let listing = common::run_ok_text(&["list", "--lines", "--only", "1"], TWO_CHANGES);
+    // The detail line of the addition reads "<i> + B"; take the caller's route to `i`.
+    let i = listing
+        .lines()
+        .find_map(|l| l.trim_end().strip_suffix(" + B"))
+        .map(|head| head.trim().to_string())
+        .unwrap_or_else(|| panic!("no detail line for the addition in:\n{listing}"));
+
+    common::run(&["select", &format!("1@L{i}")], TWO_CHANGES)
+        .success()
+        // The addition is staged and the deletion beside it is not: it comes back as context.
+        .stdout(predicate::str::contains("+B"))
+        .stdout(predicate::str::contains("-b").not());
+}
+
+#[test]
+fn list_only_narrows_the_listing_and_keeps_the_indices() {
+    common::run(&["list", "--only", "2"], TWO_CHANGES)
+        .success()
+        .stdout(predicate::str::contains("[2]"))
+        .stdout(predicate::str::contains("[1]").not());
+}
+
+#[test]
+fn list_lines_with_json_is_a_usage_error() {
+    // `changed_lines` already carries the detail in JSON, so the two flags together would ask
+    // for one thing in two ways; clap refuses the combination rather than picking one.
+    common::run(&["list", "--json", "--lines"], TWO_CHANGES)
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn list_only_with_a_line_set_is_a_usage_error() {
+    common::run(&["list", "--only", "1@L1"], TWO_CHANGES)
+        .code(2)
+        .stderr(predicate::str::contains("@L"));
+}
+
+#[test]
+fn list_only_narrows_the_json_listing_too() {
+    let json: serde_json::Value = serde_json::from_slice(&common::run_ok(
+        &["list", "--json", "--only", "2"],
+        TWO_CHANGES,
+    ))
+    .expect("stdout is JSON");
+    let hunks = json[0]["hunks"].as_array().expect("hunks is an array");
+    assert_eq!(hunks.len(), 1, "only the addressed sub-hunk is listed");
+    assert_eq!(hunks[0]["index"], 2, "and it keeps the index it had");
+}
+
+#[test]
+fn one_selector_per_only_flag_and_a_stray_argument_is_reported() {
+    // Repeating the flag names several sub-hunks...
+    let both = common::run_ok_text(&["list", "--only", "1", "--only", "2"], TWO_CHANGES);
+    assert!(both.contains("[1]") && both.contains("[2]"), "{both}");
+    // ...and a second value after one flag is a stray argument, not another selector.
+    common::run(&["list", "--only", "1", "2"], TWO_CHANGES).code(2);
+}
+
+/// A binary entry has no sub-hunks. `select` takes it whole for any index (the binary change is
+/// what it emits), but the listing would print the entry's one line for an index it never
+/// listed, and every index would look accepted.
+#[test]
+fn an_index_on_a_binary_entry_is_a_usage_error_for_the_listing() {
+    const BINARY: &str = "\
+diff --git a/f b/f
+GIT binary patch
+literal 4
+Lc$_iAxSk1
+";
+    common::run(&["list", "--only", "7"], BINARY)
+        .code(2)
+        .stderr(predicate::str::contains("no such sub-hunk"));
+    // The entry itself still lists, and `*` still names it.
+    common::run(&["list", "--only", "*"], BINARY)
+        .success()
+        .stdout(predicate::str::contains("(binary)"));
+}
+
 // ---------------------------------------------------------------------------
 // split tests
 // ---------------------------------------------------------------------------

@@ -64,8 +64,10 @@ pub enum SelectError {
     /// A selector used the removed `INDEX@lo-hi` added-line range form. Carries the offending
     /// selector so the message can point the caller at the `@L` replacement.
     RemovedRangeForm(String),
-    /// An `INDEX@L<set>` line-set selector could not be applied (an out-of-range changed line,
-    /// or the sub-hunk combined with another selection).
+    /// An `INDEX@L<set>` line-set selector could not be used. Either it could not be applied —
+    /// an out-of-range changed line, a binary file, the sub-hunk combined with another
+    /// selection — or it was given where a whole sub-hunk is addressed, which is what
+    /// [`resolve_subhunk_filter`] refuses. The message says which.
     LineSelect(String),
 }
 
@@ -389,6 +391,17 @@ pub(crate) fn all_same_content(items: &[(&FileDiff, &Hunk)]) -> bool {
     })
 }
 
+/// What a resolution is for. The two differ on one point only: a binary entry has no sub-hunks,
+/// so `select` takes it whole for any non-line-set selector (the binary change is what it emits),
+/// while a listing addressing an index there names something that is not in the listing at all.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    /// Building a result diff (`select`).
+    Emit,
+    /// Narrowing a listing (`list --only`).
+    Listing,
+}
+
 /// One resolved selection within a file: a whole sub-hunk, or a sub-hunk cut to an arbitrary
 /// set of its changed lines.
 #[derive(Clone)]
@@ -481,7 +494,7 @@ pub fn select(patch: &Patch, selectors: &[Selector]) -> Result<Patch, SelectErro
     // each referenced file is split once (selectors may target the same file repeatedly). The
     // cache is shared between the resolution and emission phases below.
     let mut subs_cache: BTreeMap<usize, Vec<Hunk>> = BTreeMap::new();
-    let chosen = resolve_selectors(patch, selectors, &mut subs_cache)?;
+    let chosen = resolve_selectors(patch, selectors, Purpose::Emit, &mut subs_cache)?;
     if chosen.is_empty() {
         return Err(SelectError::EmptySelection);
     }
@@ -494,12 +507,65 @@ pub fn select(patch: &Patch, selectors: &[Selector]) -> Result<Patch, SelectErro
     Ok(out)
 }
 
+/// Which sub-hunks of which files a set of selectors addresses: an index into `patch.files`
+/// mapped to the 1-based sub-hunk indices named for that file. A binary entry has no sub-hunks,
+/// so naming one maps it to an empty set.
+pub type SubhunkFilter = BTreeMap<usize, BTreeSet<usize>>;
+
+/// Resolve `selectors` to the sub-hunks they address without building a result diff. The
+/// listing narrows itself with this (`hunkpick list --only <selectors>`), so a caller reads one
+/// grammar and the indices printed stay the ones `select` accepts.
+///
+/// The `INDEX@L<set>` form is refused: a subset of a sub-hunk's changed lines addresses a cut,
+/// not a sub-hunk to show, and accepting it would list a whole sub-hunk for a selector that
+/// named part of one.
+///
+/// # Errors
+///
+/// The selector errors [`select`] reports — an unknown path, an index the file does not have,
+/// an id that matches nothing — plus [`SelectError::EmptySelection`] for an empty selector list
+/// and [`SelectError::LineSelect`] for an `@L` form.
+pub fn resolve_subhunk_filter(
+    patch: &Patch,
+    selectors: &[Selector],
+) -> Result<SubhunkFilter, SelectError> {
+    for sel in selectors {
+        if let Selector::File {
+            indices: IndexSet::LineSet { index, .. },
+            ..
+        } = sel
+        {
+            return Err(SelectError::LineSelect(format!(
+                "{index}@L addresses changed lines within a sub-hunk, not a sub-hunk to list; \
+                 drop the @L part"
+            )));
+        }
+    }
+    let mut subs_cache: BTreeMap<usize, Vec<Hunk>> = BTreeMap::new();
+    let chosen = resolve_selectors(patch, selectors, Purpose::Listing, &mut subs_cache)?;
+    if chosen.is_empty() {
+        return Err(SelectError::EmptySelection);
+    }
+    Ok(chosen
+        .into_iter()
+        .map(|(fi, picks)| {
+            let indices = picks
+                .into_ordered()
+                .into_iter()
+                .map(|c| c.index())
+                .collect();
+            (fi, indices)
+        })
+        .collect())
+}
+
 /// Resolution phase: turn each selector into a per-file map of chosen sub-hunks, auto-splitting
 /// (and caching, via `subs_cache`) each referenced file on demand. The cache is returned to the
 /// caller because the emission phase reuses the same splits.
 fn resolve_selectors(
     patch: &Patch,
     selectors: &[Selector],
+    purpose: Purpose,
     subs_cache: &mut BTreeMap<usize, Vec<Hunk>>,
 ) -> Result<BTreeMap<usize, FilePicks>, SelectError> {
     let mut chosen: BTreeMap<usize, FilePicks> = BTreeMap::new();
@@ -526,6 +592,7 @@ fn resolve_selectors(
                 &paths,
                 path.as_deref(),
                 indices,
+                purpose,
                 subs_cache,
                 &mut chosen,
             )?,
@@ -541,6 +608,7 @@ fn resolve_file_selector(
     paths: &PathIndex<'_>,
     path: Option<&[u8]>,
     indices: &IndexSet,
+    purpose: Purpose,
     subs_cache: &mut BTreeMap<usize, Vec<Hunk>>,
     chosen: &mut BTreeMap<usize, FilePicks>,
 ) -> Result<(), SelectError> {
@@ -553,6 +621,17 @@ fn resolve_file_selector(
                 "{} is a binary file",
                 patch.files[fi].display_path()
             )));
+        }
+        // An index addresses a sub-hunk, and a binary entry has none. `select` still takes the
+        // entry whole — the binary change is what it has to emit — but a listing would answer an
+        // index it does not list with the entry's one line, and any index would look accepted.
+        if let (Purpose::Listing, IndexSet::List(list)) = (purpose, indices) {
+            if let Some(i) = list.first() {
+                return Err(SelectError::NoIndex(format!(
+                    "{}:{i}",
+                    display_name(patch, fi, path)
+                )));
+            }
         }
         chosen.entry(fi).or_default();
         return Ok(());
@@ -1291,7 +1370,7 @@ rename to b";
         let sels = parse_selectors(&ids).unwrap();
 
         let mut subs_cache = BTreeMap::new();
-        let chosen = resolve_selectors(&p, &sels, &mut subs_cache).unwrap();
+        let chosen = resolve_selectors(&p, &sels, Purpose::Emit, &mut subs_cache).unwrap();
         let picks: usize = chosen.values().map(|f| f.len()).sum();
         assert_eq!(
             picks, RUNS,
@@ -1316,7 +1395,7 @@ rename to b";
         let sels = parse_selectors(&vec!["*".to_string(); RUNS]).unwrap();
 
         let mut subs_cache = BTreeMap::new();
-        let chosen = resolve_selectors(&p, &sels, &mut subs_cache).unwrap();
+        let chosen = resolve_selectors(&p, &sels, Purpose::Emit, &mut subs_cache).unwrap();
         let picks: usize = chosen.values().map(|f| f.len()).sum();
         assert_eq!(
             picks, RUNS,
@@ -1782,6 +1861,78 @@ diff --git a/f b/f
         assert!(
             crate::validate::validate_internal(&out).is_err(),
             "so the result inherits the disagreement and fails the output check"
+        );
+    }
+
+    #[test]
+    fn a_filter_maps_each_file_to_the_indices_named_for_it() {
+        let p = parse(TWO_FILES.as_bytes()).unwrap();
+        let sels = parse_selectors(&["x:1".to_string(), "y:*".to_string()]).unwrap();
+        let filter = resolve_subhunk_filter(&p, &sels).unwrap();
+        assert_eq!(filter.len(), 2, "both files named");
+        assert_eq!(filter[&0], BTreeSet::from([1]));
+        assert_eq!(filter[&1], BTreeSet::from([1]));
+    }
+
+    #[test]
+    fn a_filter_takes_the_indices_of_an_id_wherever_it_matches() {
+        // The same change twice: `@id` addresses both sub-hunks, and the filter reports both
+        // indices rather than the first match.
+        let p = parse(SAME_TWICE.as_bytes()).unwrap();
+        let view = build_view(&p);
+        let id = crate::subhunk_id::subhunk_id(&p.files[0], &view[0][0]);
+        let sels = parse_selectors(&[format!("@{id}")]).unwrap();
+        let filter = resolve_subhunk_filter(&p, &sels).unwrap();
+        assert_eq!(filter[&0], BTreeSet::from([1, 2]));
+    }
+
+    #[test]
+    fn a_filter_refuses_a_line_set() {
+        // `@L` names changed lines inside a sub-hunk. Listing the whole sub-hunk for it would
+        // answer a question the caller did not ask, so it is a usage error.
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
+        let sels = parse_selectors(&["1@L1".to_string()]).unwrap();
+        let err = resolve_subhunk_filter(&p, &sels).unwrap_err();
+        assert!(
+            matches!(err, SelectError::LineSelect(ref m) if m.contains("@L")),
+            "the message must point at the @L part: {err}"
+        );
+    }
+
+    #[test]
+    fn a_filter_of_nothing_is_an_empty_selection() {
+        // An empty selector list selects nothing in `select`, and must not quietly become an
+        // empty listing here either.
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
+        assert_eq!(
+            resolve_subhunk_filter(&p, &[]).unwrap_err(),
+            SelectError::EmptySelection
+        );
+    }
+
+    #[test]
+    fn a_filter_naming_a_binary_file_holds_it_with_no_sub_hunks() {
+        // A binary entry has no sub-hunks to address; naming it puts the file in the listing
+        // (where it prints as "(binary)") with an empty index set.
+        const BINARY: &str = "\
+diff --git a/f b/f
+GIT binary patch
+literal 4
+Lc$_iAxSk1
+";
+        let p = parse(BINARY.as_bytes()).unwrap();
+        let sels = parse_selectors(&["*".to_string()]).unwrap();
+        let filter = resolve_subhunk_filter(&p, &sels).unwrap();
+        assert_eq!(filter[&0], BTreeSet::new());
+    }
+
+    #[test]
+    fn a_filter_reports_an_index_the_file_does_not_have() {
+        let p = parse(TWO_CHANGES.as_bytes()).unwrap();
+        let sels = parse_selectors(&["9".to_string()]).unwrap();
+        assert_eq!(
+            resolve_subhunk_filter(&p, &sels).unwrap_err(),
+            SelectError::NoIndex("f:9".to_string())
         );
     }
 }

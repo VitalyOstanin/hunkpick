@@ -26,6 +26,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `list --lines` prints each sub-hunk's changed (`+`/`-`) lines under its header line, each with
+  the 1-based index `select INDEX@L<set>` cuts by. That numbering was published only in
+  `list --json`, under `changed_lines`, so cutting a sub-hunk meant leaving the tool for
+  `list --json | jq '.[0].hunks[7].changed_lines[]'` — three things to get right (the file's
+  position in the array, the sub-hunk's, the field names) for a question the listing itself can
+  answer, plus a dependency on `jq` that the rest of the pipeline does not have. The detail is
+  escaped the way the rest of the human listing is, and the sub-hunk is printed whole: a long
+  one is exactly where an `@L` cut is needed, and an elision would hide the numbers it was read
+  for. Not accepted with `--json`, which already carries this.
+- `list --only <selector>` narrows the listing to the sub-hunks that selector addresses, reading
+  the grammar `select` reads (`N`, `N,M`, `A-B`, `path:N`, `path:*`, `*`, `@ID`) — all but
+  `INDEX@L<set>`, which addresses changed lines within a sub-hunk rather than a sub-hunk to
+  list, and is refused. One selector per flag, repeated to name several
+  (`--only src/a.rs:1 --only src/b.rs:2`): a flag that swallowed every following value would
+  read a mistyped argument as another selector instead of reporting it. A selector that matches
+  nothing is a usage error (exit 2) rather than an empty listing, including an index on a binary
+  entry, which has no sub-hunks to address — `select` still takes such an entry whole, since the
+  binary change is what it emits. Nothing is renumbered: an index or an id read off a narrowed
+  listing addresses what it addresses in the full one, and the JSON schema is unchanged
+  (`id_count` still counts the whole patch). Works with both output forms, and pairs with
+  `--lines` to show one sub-hunk's changed lines on a large diff.
+- `select::resolve_subhunk_filter` resolves selectors to the sub-hunks they address without
+  building a result diff, and `select::SubhunkFilter` names what it returns. `list --only` is
+  built on it, so the listing and `select` cannot drift apart on what a selector means.
+
+### Changed
+
+- **Breaking (library):** `list::list_human` and `list::list_json` both take a
+  `list::ListOptions` instead of a bare `color` flag. The options carry the colour flag, the
+  per-line detail and the filter, so a later listing option changes that type rather than either
+  signature; the JSON listing reads only the filter, since colour has no meaning there and the
+  changed lines are in its schema unconditionally.
+
 ## [0.10.0] - 2026-09-05
 
 ### Added

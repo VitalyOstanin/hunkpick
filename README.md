@@ -136,6 +136,12 @@ git diff src/main.rs | hunkpick list
 # Machine-readable JSON
 git diff src/main.rs | hunkpick list --json
 
+# Show each sub-hunk's changed lines, numbered the way `select ... @L` numbers them
+git diff src/main.rs | hunkpick list --lines
+
+# Narrow the listing to the sub-hunks given selectors address
+git diff src/main.rs | hunkpick list --lines --only 8
+
 # Control colorisation
 git diff src/main.rs | hunkpick list --color always
 ```
@@ -165,6 +171,45 @@ between the counts and the preview — the same property the JSON listing report
 src/new_file.rs
   [1] 3f1c0a52d7b94e68 @@ -0,0 +1,12 @@  +12 -0 [+add]  +fn main() {
 ```
+
+**`--lines`** prints each sub-hunk's changed (`+`/`-`) lines under its header line, each with
+the 1-based index it has *within that sub-hunk*:
+
+```
+src/service.kt
+  [8] b00112d611cb38ab @@ -324,8 +324,9 @@  +3 -2  -/** How often the mode is reconsidered ...
+      1 - /** How often the mode is reconsidered while the service runs. */
+      2 - private val REVIEW: Duration = Duration.ofMinutes(5)
+      3 + private val REVIEW: Duration = AHEAD
+      4 +
+      5 + private val WAIT: Duration = Duration.ofMinutes(1)
+```
+
+That index is exactly what [`select INDEX@L<set>`](#splitting-by-individual-changed-lines-indexlset)
+cuts by — `select 8@L3` stages the third line above and nothing else — so a cut needs no
+detour through `list --json` and `jq`. Deletions and additions share one numbering, and the
+whole sub-hunk is printed: a long one is precisely where an `@L` cut is needed, and an elision
+would hide the numbers. `--lines` is not accepted with `--json`, which already carries this
+under `changed_lines`.
+
+**`--only <selector>`** lists just the sub-hunks that selector addresses, using the same grammar
+as `select` (`N`, `N,M`, `A-B`, `path:N`, `path:*`, `*`, `@ID`) — everything but the
+`INDEX@L<set>` form, which addresses changed lines within a sub-hunk rather than a sub-hunk to
+list. Repeat the flag to name several:
+
+```sh
+git diff | hunkpick list --only src/a.rs:1 --only src/b.rs:2
+```
+
+One value per flag, so a mistyped argument after it is still reported as a stray argument rather
+than read as another selector. A selector that matches nothing — an unknown path, an index the
+file does not have (including any index on a binary entry, which has no sub-hunks), an id no
+sub-hunk carries — is a usage error (exit 2), not an empty listing.
+
+Nothing is renumbered: `list --only 2` prints `[2]`, and with `--json` the schema is unchanged
+(`id_count` still counts the whole patch), so a selector read off a narrowed listing addresses
+the same sub-hunk as one read off the full listing. It works with both output forms and combines
+with `--lines` to show one sub-hunk's changed lines on a large diff.
 
 Text a terminal would act on rather than show — escape sequences, control bytes,
 bidirectional overrides — is escaped in this listing (`\x1b`, `\u{202e}`), so a diff
@@ -219,16 +264,16 @@ git diff path | hunkpick select path:2-4 | git apply --cached
 git diff | hunkpick select src/main.rs:* | git apply --cached
 git diff src/main.rs | hunkpick select '*' | git apply --cached
 
-# Select by content id (from `list --json`), stable across re-diffs
+# Select by content id (printed by `list`, and in `list --json`), stable across re-diffs
 git diff | hunkpick select @8002dd73f0dfd2f4 | git apply --cached
 
 # Content ids work across a multi-file diff too: the file path is part of the id, so
 # an id addresses the change in its own file (the same edit elsewhere gets another id).
 git diff src/a.rs src/b.rs src/c.rs | hunkpick select @8002dd73f0dfd2f4 | git apply --cached
 
-# Several ids at once, mixed with path: selectors. Read the ids from `list --json` first
-# (the machine-readable form, intended for tooling):
-git diff | hunkpick list --json
+# Several ids at once, mixed with path: selectors. Read the ids from the listing first —
+# `list` prints them beside the index; `list --json` is the machine-readable form:
+git diff | hunkpick list
 git diff | hunkpick select @8002dd73f0dfd2f4 @bf7bdaaf30c1e2d4 src/lib.rs:2 | git apply --cached
 ```
 
@@ -367,8 +412,8 @@ lines**:
 `INDEX` is the 1-based sub-hunk index from `list`. **Only a numeric index may precede `@`** —
 content ids (`@id`) and `*` are not accepted here. `<set>` starts with `L` and then numbers
 the sub-hunk's changed lines `1..N` in body order — deletions and additions share one
-numbering, exactly as `list --json` reports them under `changed_lines`. The set is a
-comma-separated list of indices and ranges, e.g. `L1,3` or `L1-2,4`.
+numbering, as printed by `list --lines` and reported by `list --json` under `changed_lines`.
+The set is a comma-separated list of indices and ranges, e.g. `L1,3` or `L1-2,4`.
 
 Each unselected deletion is kept as a context line and each unselected addition is omitted,
 and both leading and trailing context of the sub-hunk are retained. A subset is therefore
@@ -405,8 +450,19 @@ another `@L`, or with a whole selection of the same sub-hunk, is a usage error
 later `diff → stage → re-diff` rounds. A partial `@L` on an entry that deletes the file is a
 usage error for the reason given above.
 
-Example — separate a replacement's removals from its insertions. `list --json` shows the
-changed lines and their indices:
+Example — separate a replacement's removals from its insertions. `list --lines --only 1` shows
+the changed lines and their indices:
+
+```
+f
+  [1] ee01f628b3cbd4e9 @@ -1,2 +1,2 @@  +2 -2  -a
+      1 - a
+      2 - b
+      3 + A
+      4 + B
+```
+
+The same indices in `list --json`, under `changed_lines`:
 
 ```json
 "changed_lines": [
@@ -608,6 +664,7 @@ ends the run with code 0, so the tool composes with `set -o pipefail`.
 | Explicit hunk split at a named line             |     ❌     |    ✅    |
 | Machine-readable listing (JSON)                 |     ❌     |    ✅    |
 | Split any sub-hunk by individual changed lines  |     ❌     |    ✅    |
+| Show the changed-line numbering a cut addresses |     ❌     |    ✅    |
 
 ## Development
 

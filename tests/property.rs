@@ -267,6 +267,25 @@ fn range(start: usize, count: usize) -> String {
 }
 
 /// Sub-hunk indices of the single file of a parsed patch.
+/// The content ids a listing reports, in listing order. Ids are what a caller carries from a
+/// listing into `select`, so comparing two listings by them compares what a selector addresses
+/// rather than where it happened to land.
+fn ids_of(listing: &str) -> Vec<String> {
+    let files: serde_json::Value = serde_json::from_str(listing).expect("the listing is JSON");
+    files
+        .as_array()
+        .expect("an array of files")
+        .iter()
+        .flat_map(|f| {
+            f["hunks"]
+                .as_array()
+                .expect("an array of sub-hunks")
+                .iter()
+                .map(|h| h["id"].as_str().expect("an id").to_string())
+        })
+        .collect()
+}
+
 fn sub_hunk_count(patch: &Patch) -> usize {
     select::build_view(patch)
         .first()
@@ -310,6 +329,41 @@ proptest! {
         prop_assert_eq!(validate::validate_input(&result), Ok(()));
     }
 
+    /// `list --only` and `select` read one grammar through one resolver, so the sub-hunks a
+    /// selector lists are the sub-hunks that selector stages. The listing is what a caller reads
+    /// before staging; a listing that named a different set would be a promise the staging does
+    /// not keep. Compared by content id, which is context-free and therefore survives being cut
+    /// out of the larger diff.
+    #[test]
+    fn a_filtered_listing_names_the_sub_hunks_select_takes(
+        shape in arb_shape(),
+        mask in any::<u32>(),
+    ) {
+        let src = render(&shape);
+        let patch = parser::parse(&src).expect("generated diffs are well formed");
+        let count = sub_hunk_count(&patch);
+        prop_assume!(count > 0);
+
+        let picks: Vec<String> = (1..=count)
+            .filter(|i| mask & (1 << (i % 32)) != 0)
+            .map(|i| i.to_string())
+            .collect();
+        prop_assume!(!picks.is_empty());
+
+        let selectors = select::parse_selectors(&picks).expect("indices always parse");
+        let filter = select::resolve_subhunk_filter(&patch, &selectors)
+            .expect("in-range indices resolve");
+        let listed = ids_of(&list::list_json(
+            &patch,
+            &list::ListOptions { filter: Some(&filter), ..Default::default() },
+        ));
+
+        let staged_patch = select::select(&patch, &selectors).expect("the same selectors select");
+        let staged = ids_of(&list::list_json(&staged_patch, &list::ListOptions::default()));
+
+        prop_assert_eq!(listed, staged);
+    }
+
     /// Recomputing the new-side anchors of a diff that already has correct ones changes
     /// nothing: the pass has to be idempotent, or repeated `select` invocations would drift.
     #[test]
@@ -335,7 +389,8 @@ proptest! {
         prop_assume!(sub_hunk_count(&patch) > 0);
 
         let listing: serde_json::Value =
-            serde_json::from_str(&list::list_json(&patch)).expect("the listing is JSON");
+            serde_json::from_str(&list::list_json(&patch, &list::ListOptions::default()))
+                .expect("the listing is JSON");
         let hunks = listing[0]["hunks"].as_array().expect("a file with sub-hunks");
         // The id shared by the most sub-hunks: with a repeated edit it names several, otherwise
         // it names one, and both are worth asserting.
