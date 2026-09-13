@@ -152,7 +152,7 @@ jobs:
       # express. Mirrors the CI test job so the release gate runs the same way.
       - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
         with:
-          tool: cargo-nextest@0.9.143
+          tool: cargo-nextest@0.9.144
       - name: Fetch dependencies (with retry)
         uses: ./.github/actions/cargo-fetch-retry
       - name: cargo build

@@ -83,7 +83,7 @@ jobs:
       # parallelism that `cargo test` cannot express.
       - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
         with:
-          tool: cargo-nextest@0.9.143
+          tool: cargo-nextest@0.9.144
       - name: Run tests
         run: cargo nextest run --all-features
       # nextest does not run doctests; keep them covered explicitly.
@@ -124,7 +124,7 @@ jobs:
       - uses: ./.github/actions/cargo-fetch-retry
       - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
         with:
-          tool: cargo-llvm-cov@0.9.0,cargo-nextest@0.9.143
+          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.144
       # Line coverage over the same test set nextest runs (the profile in
       # .config/nextest.toml applies here too). Doctests are excluded — they
       # exercise docs, not the coverage-relevant code paths.
