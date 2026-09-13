@@ -61,6 +61,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signature; the JSON listing reads only the filter, since colour has no meaning there and the
   changed lines are in its schema unconditionally.
 
+### Fixed
+
+- The human listing now escapes the C1 controls (`U+0080`–`U+009F`) and `U+061C` (ARABIC LETTER
+  MARK) as well. Refusing `ESC` did not refuse what `ESC` introduces: a terminal reading UTF-8
+  takes `U+009B` as the control sequence introducer in one character and `U+0085` as a line
+  break, so diff content could still repaint or break up the listing an operator reads; `U+061C`
+  reorders a line like the marks beside it that were already escaped. `--lines` made this reach
+  further — the whole text of every changed line goes through that pass, not one preview line.
+
 ## [0.10.0] - 2026-09-05
 
 ### Added

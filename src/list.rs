@@ -201,8 +201,20 @@ fn sanitize(s: &str) -> String {
             c if (c as u32) < 0x20 || c == '\u{7f}' => {
                 let _ = write!(out, "\\x{:02x}", c as u32);
             }
-            // Bidirectional formatting: can visually reorder the rest of the line.
-            '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => {
+            // C1 controls. Blocking ESC alone does not block what ESC introduces: a terminal
+            // reading UTF-8 takes U+009B as the control sequence introducer `ESC [` in one
+            // character, and U+0085 as a line break in the middle of a listing row. They carry
+            // no glyph, so escaping them loses nothing that was displayable.
+            '\u{80}'..='\u{9f}' => {
+                let _ = write!(out, "\\u{{{:04x}}}", c as u32);
+            }
+            // Bidirectional formatting: can visually reorder the rest of the line. U+061C is an
+            // implicit mark like U+200E and U+200F, not an embedding, and belongs with them.
+            '\u{61c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}' => {
                 let _ = write!(out, "\\u{{{:04x}}}", c as u32);
             }
             c => out.push(c),
@@ -745,6 +757,34 @@ diff --git a/b.rs b/b.rs
             hunks[0]["id_count"], 2,
             "the id is still shared with the other"
         );
+    }
+
+    #[test]
+    fn c1_controls_and_the_arabic_letter_mark_are_escaped() {
+        // U+009B is the control sequence introducer in one character: a terminal reading UTF-8
+        // acts on it exactly as on `ESC [`, which this listing refuses to pass through. U+0085
+        // breaks the line. U+061C reorders like the other implicit marks.
+        let src = "\
+--- a/f
++++ b/f
+@@ -1 +1 @@
+-\u{9b}31mred\u{85}broken\u{61c}marked
++plain
+";
+        let p = parse(src.as_bytes()).unwrap();
+        let out = list_human(
+            &p,
+            &ListOptions {
+                lines: true,
+                ..Default::default()
+            },
+        );
+        for c in ['\u{9b}', '\u{85}', '\u{61c}'] {
+            assert!(!out.contains(c), "raw {:?} left in the listing: {out:?}", c);
+        }
+        for escaped in ["\\u{009b}", "\\u{0085}", "\\u{061c}"] {
+            assert!(out.contains(escaped), "{escaped} expected in: {out:?}");
+        }
     }
 
     #[test]
