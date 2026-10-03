@@ -150,7 +150,7 @@ jobs:
       # Prebuilt nextest binary: the .config/nextest.toml profile enforces a
       # per-test timeout and bounded parallelism that `cargo test` cannot
       # express. Mirrors the CI test job so the release gate runs the same way.
-      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-nextest@0.9.146
       - name: Fetch dependencies (with retry)
@@ -227,7 +227,7 @@ jobs:
           ref: ${{ env.RELEASE_REF }}
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-semver-checks@0.50.0
       - name: Check the public API against the released version
@@ -350,7 +350,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - name: Fetch dependencies (with retry)
         uses: ./.github/actions/cargo-fetch-retry
-      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-about@0.9.2
       - name: Generate third-party notices
