@@ -363,14 +363,25 @@ pub fn validate_with_git(diff_bytes: &[u8], dir: &Path) -> Result<(), GitCheckEr
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     match output.status.code() {
         Some(0) => Ok(()),
-        // `git apply --check` answers 1, and only 1, when the patch does not apply; that is the
-        // only status carrying a verdict about the diff. 128 is a fatal error of git's own and
-        // `None` is death by signal — neither looked at the patch, and calling either a
-        // rejection blames hunkpick's output for a broken environment (ADR 0013 keeps exit 70
-        // for a result hunkpick itself produced).
+        // `git apply --check` answers 1 when the patch does not apply. It answers 128 both for a
+        // patch it cannot parse (`error: corrupt patch at line N`, `error: No valid patches in
+        // input`) and for a fatal error of its own (`fatal: bad config line …`); the first is a
+        // verdict about the diff, the second never looked at it. The two differ by git's own
+        // message prefix — `error:` against `fatal:` — which the pinned locale keeps English
+        // (verified against git 2.53.0). `None` is death by signal. Calling an environment
+        // failure a rejection would blame hunkpick's output for it (ADR 0013 keeps exit 70 for
+        // a result hunkpick itself produced).
         Some(1) => Err(GitCheckError::Rejected(stderr)),
+        Some(128) if is_parse_verdict(&stderr) => Err(GitCheckError::Rejected(stderr)),
         code => Err(GitCheckError::Failed { code, stderr }),
     }
+}
+
+/// Whether git's stderr on exit 128 reports a patch it could not parse rather than a failure
+/// of its own: an `error:` line and no `fatal:` one.
+fn is_parse_verdict(stderr: &str) -> bool {
+    let mut lines = stderr.lines();
+    !lines.clone().any(|l| l.starts_with("fatal:")) && lines.any(|l| l.starts_with("error:"))
 }
 
 #[cfg(test)]
@@ -625,5 +636,21 @@ diff --git a/f b/f
     fn git_check_rejects_bad_result() {
         let dir = repo_with_file("totally\ndifferent\ncontent\n");
         assert!(validate_with_git(ONE_CHANGE.as_bytes(), dir.path()).is_err());
+    }
+
+    /// git answers a patch it cannot parse with exit 128 and an `error:` line, not with 1. That
+    /// is still a verdict about the diff, and it must be reported as a rejection (exit 70), not
+    /// as a git that never got to look at it (exit 74).
+    #[test]
+    fn git_check_reports_a_corrupt_patch_as_a_rejection() {
+        let dir = repo_with_file("a\nb\nc\n");
+        // The hunk promises three old lines and delivers two: `corrupt patch at line 7`.
+        let corrupt = "--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n";
+        match validate_with_git(corrupt.as_bytes(), dir.path()) {
+            Err(GitCheckError::Rejected(stderr)) => {
+                assert!(stderr.contains("corrupt patch"), "stderr: {stderr}");
+            }
+            other => panic!("expected a rejection, got {other:?}"),
+        }
     }
 }

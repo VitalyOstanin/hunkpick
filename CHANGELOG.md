@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `--verify-result-diff-git` reported a result git could not parse as a broken environment.
+  `git apply --check` answers such a patch (`error: corrupt patch at line N`,
+  `error: No valid patches in input`) with exit 128, not 1, and every 128 was read as git
+  failing on its own, so a defective result hunkpick produced ended with exit 74 and "the
+  result diff was not checked" instead of exit 70. An exit 128 whose stderr carries an `error:`
+  line and no `fatal:` one is now a rejection; `fatal:` (a broken repository or configuration)
+  and death by signal stay exit 74.
+
 ## [0.11.0] - 2026-09-13
 
 ### Added
