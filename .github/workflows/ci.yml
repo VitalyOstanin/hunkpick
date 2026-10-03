@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -72,7 +72,7 @@ jobs:
         os: [ubuntu-24.04, ubuntu-26.04, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # A flaky crates.io download fails the run otherwise, and cargo's own net.retry does not
       # classify every such failure as spurious. The release workflow has used this since it
@@ -83,7 +83,7 @@ jobs:
       # parallelism that `cargo test` cannot express.
       - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
         with:
-          tool: cargo-nextest@0.9.144
+          tool: cargo-nextest@0.9.146
       - name: Run tests
         run: cargo nextest run --all-features
       # nextest does not run doctests; keep them covered explicitly.
@@ -117,14 +117,14 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: ./.github/actions/cargo-fetch-retry
       - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
         with:
-          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.144
+          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
       # Line coverage over the same test set nextest runs (the profile in
       # .config/nextest.toml applies here too). Doctests are excluded — they
       # exercise docs, not the coverage-relevant code paths.
@@ -154,7 +154,7 @@ jobs:
       # stable and report success without ever seeing 1.85. Same reason as fuzz-setup.
       - shell: bash
         run: echo "RUSTUP_TOOLCHAIN=1.85.0" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@3230091d7ef9483f601620abacc570c22cf44d22 # 1.85.0
+      - uses: dtolnay/rust-toolchain@0acae73baee12cc81c9b1fb9e8f8b7672bf17c6a # 1.85.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: ./.github/actions/cargo-fetch-retry
       # `--locked` as in the release workflow: the MSRV gate must be checked against the
@@ -175,7 +175,7 @@ jobs:
     # so this gates on "the version says what the API did", not on "never break anything".
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: ./.github/actions/cargo-fetch-retry
       - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
