@@ -239,28 +239,32 @@ pub fn split_patch_hunk(
         });
     }
     // The flag is about one line of the input — its last — so only a cut of the last hunk of
-    // the last file can invalidate it. Remember which line that is before the cut.
-    let last_line_before = (fi + 1 == patch.files.len() && hi + 1 == patch.files[fi].hunk_count())
-        .then(|| last_body_line(&patch.files[fi].content).cloned())
+    // the last file can invalidate it. Remember where that line is before the cut: by position,
+    // since a kept line can read the same as the dropped one.
+    let end_before = (fi + 1 == patch.files.len() && hi + 1 == patch.files[fi].hunk_count())
+        .then(|| last_hunk_old_end(&patch.files[fi].content))
         .flatten();
 
     let pieces = split_file_hunk(&mut patch.files[fi], hi, new_line_cuts)?;
 
-    if let Some(was) = last_line_before {
+    if let Some(was) = end_before {
         let f = &patch.files[fi];
         // The entry ends on its tail when it has one, whichever way the hunks above were cut;
         // `select` reads the same rule off the same method where it builds its result.
-        let still_there = f.ends_on_a_trailer_line() || last_body_line(&f.content) == Some(&was);
+        let still_there = f.ends_on_a_trailer_line() || last_hunk_old_end(&f.content) == Some(was);
         patch.no_trailing_newline &= still_there;
     }
     Ok(pieces)
 }
 
-/// The last body line of an entry's last hunk — the line the entry's rendered form ends on,
-/// unless a trailer follows it. `None` for a binary entry or one with no hunks.
-fn last_body_line(content: &FileContent) -> Option<&Line> {
+/// Where the entry's last hunk ends on the old side. A dropped piece carries no change, so it
+/// holds at least one old-side line and moving the end is how its loss shows; the old side is
+/// never renumbered. `None` for a binary entry or one with no hunks.
+fn last_hunk_old_end(content: &FileContent) -> Option<u64> {
     match content {
-        FileContent::Text(hunks) => hunks.last()?.lines.last(),
+        FileContent::Text(hunks) => hunks
+            .last()
+            .map(|h| u64::from(h.old_start) + u64::from(h.old_lines)),
         FileContent::Binary(_) => None,
     }
 }
@@ -1042,6 +1046,38 @@ diff --git a/f b/f
         split_patch_hunk(&mut p, 0, 0, &[3]).unwrap();
         assert!(p.no_trailing_newline, "the result still ends on ` e`");
     }
+
+    /// The flag is tied to the input's last line by position. A dropped tail that ends on a line
+    /// equal in content to the one the result now ends on must still clear it: otherwise the
+    /// newline goes missing from a line in the middle of the file.
+    #[test]
+    fn a_dropped_tail_clears_the_flag_even_when_a_kept_line_reads_the_same() {
+        // New-file lines are x=1 B=2 e=3 c=4 e=5; the cut at 3 drops the change-free ` c`/` e`
+        // tail, and the kept piece ends on the first ` e`.
+        const REPEATED_LAST_LINE: &str = "\
+diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,5 +1,5 @@
+ x
+-b
++B
+ e
+ c
+ e";
+        let mut p = parse(REPEATED_LAST_LINE.as_bytes()).unwrap();
+        assert!(p.no_trailing_newline, "the input ends mid-line");
+        split_patch_hunk(&mut p, 0, 0, &[3]).unwrap();
+        assert!(
+            !p.no_trailing_newline,
+            "the result ends on the ` e` at line 3, not on the input's last line"
+        );
+        assert!(
+            emit(&p).ends_with(b" e\n"),
+            "the kept ` e` must keep its newline"
+        );
+    }
+
     /// A signature line is emitted after the last hunk, so the entry ends on it whichever way the
     /// hunks above were cut. Dropping the flag here removes the newline from a line the input did
     /// end with, and `git apply` reads the result as a corrupt patch.

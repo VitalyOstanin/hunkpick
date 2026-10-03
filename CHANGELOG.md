@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   result diff was not checked" instead of exit 70. An exit 128 whose stderr carries an `error:`
   line and no `fatal:` one is now a rejection; `fatal:` (a broken repository or configuration)
   and death by signal stay exit 74.
+- `split` kept the input's missing final newline when the cut dropped a change-free tail that
+  ended on a line reading the same as the one the result now ends on. Whether the result still
+  ends on the input's last line was decided by comparing the line's content, so for
+  `… e\n c\n e` without a final newline, `split --at 3 1` emitted the kept ` e` without its
+  newline and `git apply` rejected the output as a corrupt patch. The check now compares where
+  the last hunk ends on the old side, the way `select` decides by position.
 
 ## [0.11.0] - 2026-09-13
 
