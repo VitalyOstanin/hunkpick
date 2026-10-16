@@ -150,7 +150,7 @@ jobs:
       # Prebuilt nextest binary: the .config/nextest.toml profile enforces a
       # per-test timeout and bounded parallelism that `cargo test` cannot
       # express. Mirrors the CI test job so the release gate runs the same way.
-      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-nextest@0.9.146
       - name: Fetch dependencies (with retry)
@@ -227,7 +227,7 @@ jobs:
           ref: ${{ env.RELEASE_REF }}
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-semver-checks@0.50.0
       - name: Check the public API against the released version
@@ -350,12 +350,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - name: Fetch dependencies (with retry)
         uses: ./.github/actions/cargo-fetch-retry
-      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-about@0.9.2
       - name: Generate third-party notices
         run: bash scripts/generate-notices.sh
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: third-party-notices
           path: THIRD-PARTY-NOTICES.md
@@ -449,7 +449,7 @@ jobs:
       # binary of it for x86_64-apple-darwin, and the source fallback builds the crate without
       # its `cli` feature, so the step reports success and installs nothing.
       - name: Take the third-party notices
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: third-party-notices
 
@@ -501,7 +501,7 @@ jobs:
       # Hand the verified archive to upload-assets. Keeping the upload in a separate job is
       # what lets this one run before `publish`.
       - name: Upload archive as a workflow artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: archive-${{ matrix.target }}
           path: |
@@ -535,7 +535,7 @@ jobs:
         with:
           tag: ${{ inputs.tag }}
       - name: Download archives
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: archive-*
           merge-multiple: true
