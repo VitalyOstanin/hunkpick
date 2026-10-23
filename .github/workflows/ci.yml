@@ -23,7 +23,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: ./.github/actions/cargo-fetch-retry
       - name: Check formatting
         run: cargo fmt --all --check
@@ -49,7 +49,7 @@ jobs:
       # A licence gate, not just a document generator: cargo-about fails on any crate whose
       # licence is outside the `accepted` list in about.toml, so a new dependency under an
       # incompatible licence breaks the pull request instead of the release.
-      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-about@0.9.2
       - name: Third-party licences
@@ -73,7 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # A flaky crates.io download fails the run otherwise, and cargo's own net.retry does not
       # classify every such failure as spurious. The release workflow has used this since it
       # was written; these jobs run on every push, which is where a manual re-run costs most.
@@ -81,7 +81,7 @@ jobs:
       # Prebuilt nextest binary (no compile, no Rust-version bump): the
       # .config/nextest.toml profile enforces a per-test timeout and bounded
       # parallelism that `cargo test` cannot express.
-      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-nextest@0.9.146
       - name: Run tests
@@ -96,7 +96,7 @@ jobs:
       # all. Same treatment as the crashing input in fuzz.yml.
       - name: Upload the property-test counterexample
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: proptest-regressions-${{ matrix.os }}
           path: proptest-regressions/
@@ -120,9 +120,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: ./.github/actions/cargo-fetch-retry
-      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
       # Line coverage over the same test set nextest runs (the profile in
@@ -131,7 +131,7 @@ jobs:
       - name: Generate coverage
         run: cargo llvm-cov nextest --all-features --lcov --output-path lcov.info
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           # OIDC removes the need for a long-lived CODECOV_TOKEN secret — the
           # action exchanges a short-lived GitHub-issued JWT for an upload
@@ -155,7 +155,7 @@ jobs:
       - shell: bash
         run: echo "RUSTUP_TOOLCHAIN=1.85.0" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@0acae73baee12cc81c9b1fb9e8f8b7672bf17c6a # 1.85.0
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: ./.github/actions/cargo-fetch-retry
       # `--locked` as in the release workflow: the MSRV gate must be checked against the
       # dependency versions the project actually ships, not whatever resolves today.
@@ -176,9 +176,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: ./.github/actions/cargo-fetch-retry
-      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-semver-checks@0.50.0
       - name: Check the public API against the released version
