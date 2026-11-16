@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Contents
 
 - [Unreleased](#unreleased)
+- [0.11.2](#0112---2026-11-16)
 - [0.11.1](#0111---2026-10-03)
 - [0.11.0](#0110---2026-09-13)
 - [0.10.0](#0100---2026-09-05)
@@ -27,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [0.1.0](#010---2026-06-19)
 
 ## [Unreleased]
+
+## [0.11.2] - 2026-11-16
+
+### Security
+
+- Bumped the dev-only dependency `rustix` to 1.1.6 for
+  [RUSTSEC-2026-0486](https://rustsec.org/advisories/RUSTSEC-2026-0486.html). It reaches the
+  build only through `tempfile` (used by `proptest` and `rusty-fork` in the tests); the library
+  and the binary never depended on it, so users of 0.11.1 are not affected.
 
 ## [0.11.1] - 2026-10-03
 
