@@ -99,6 +99,14 @@ cargo install hunkpick
 cargo binstall hunkpick
 ```
 
+**On macOS via Homebrew:**
+
+```sh
+brew install VitalyOstanin/tap/hunkpick
+```
+
+This installs the prebuilt binary for Apple Silicon or Intel. If Homebrew asks you to trust the formula, run `brew trust --formula VitalyOstanin/tap/hunkpick` and retry the install.
+
 Prebuilt binaries are published for `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`. On other targets `cargo binstall` falls back to a source build.
 
 Every archive on the [releases page](https://github.com/VitalyOstanin/hunkpick/releases) carries a `.sha256` companion and a build provenance attestation. The checksum says the download arrived intact; the attestation says which workflow run, at which commit of this repository, produced those exact bytes — which the checksum cannot, since it is served from the same page as the archive:
